@@ -1,4 +1,4 @@
-# barebones code, untested and does not do anything we need it to do yet
+# barebones server code, untested and does not do anything we need it to do yet
 # uses fastapi and uvicorn
 from pathlib import Path
 import re
