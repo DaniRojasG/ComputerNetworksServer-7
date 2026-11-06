@@ -1,4 +1,4 @@
-# Computer Networks Server-Client Architecture - Group 7
+# Computer Networks Server-Client Architecture - Group 7: Nia Crusan, Dani Rojas Gonzalez, Hosevana Lindsey
 
 This project will implement a client-server architecure for a distributed file sharing system.
 The system will be under certain core constraints; employing multi-threading for quick access
@@ -12,6 +12,9 @@ and support for a myriad of file types.
 - The system will gather metrics throughout its runtime that can be later analyzed.
 - The client & server will have approriate forms of error handling for smooth operation.
 - Development of the system will be monitored via Github Remote VCS.
+- ### Server updates:
+   - added barebones test code. requires fastapi and uvicorn to be installed with `pip install fastapi uvicorn python-multipart`
+   - can be run with ``python -m uvicorn main:app --reload`` (only tested on personal computer, not in console VM yet)
 
 ## Requirements
 - Text files must be under 25 MB
