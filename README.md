@@ -13,8 +13,8 @@ and support for a myriad of file types.
 - The client & server will have approriate forms of error handling for smooth operation.
 - Development of the system will be monitored via Github Remote VCS.
 - ### Server updates:
-   - added barebones test code. requires fastapi and uvicorn to be installed with `pip install fastapi uvicorn python-multipart`
-   - can be run with ``python -m uvicorn main:app --reload`` (only tested on personal computer, not in console VM yet)
+   - 2026-11-15 added barebones test code.
+   - 2026-11-24 undid everything and restart. build things from ground up, starting with connecting server.py (uploaded to google cloud vm) and client.py (running on a personal computer)
 
 ## Requirements
 - Text files must be under 25 MB
