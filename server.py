@@ -1,14 +1,94 @@
 import json
 import os
 import socket
+import tempfile
 import threading
 from pathlib import Path
 
 HOST = "0.0.0.0"
 PORT = 3300
+CHUNK_SIZE = 64 * 1024
 STORAGE_DIR = Path(
-    os.environ.get("FILE_STORAGE_DIR", Path(__file__).resolve().parent / "storage")
+    os.environ.get("FILE_STORAGE_DIR", "/mnt/disks/file-storage")
 ).expanduser().resolve()
+
+
+def send_response(connection, response):
+    connection.sendall((json.dumps(response) + "\n").encode("utf-8"))
+
+
+def receive_upload(connection, reader, request):
+    filename = request.get("filename")
+    size = request.get("size")
+    overwrite = request.get("overwrite", False)
+    if (
+        not isinstance(filename, str)
+        or not filename
+        or filename in {".", ".."}
+        or "/" in filename
+        or "\\" in filename
+        or "\0" in filename
+    ):
+        send_response(connection, {"ok": False, "error": "Invalid filename."})
+        return
+    if type(size) is not int or size < 0:
+        send_response(connection, {"ok": False, "error": "Invalid file size."})
+        return
+    if not isinstance(overwrite, bool):
+        send_response(connection, {"ok": False, "error": "Invalid overwrite option."})
+        return
+
+    destination = STORAGE_DIR / filename
+    destination_exists = destination.exists() or destination.is_symlink()
+    if destination.is_dir():
+        send_response(connection, {"ok": False, "error": "A directory with that name exists."})
+        return
+    if destination_exists and not overwrite:
+        send_response(connection, {"ok": False, "exists": True, "error": "File already exists."})
+        return
+
+    temporary_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=STORAGE_DIR,
+            prefix=".upload-",
+            suffix=".tmp",
+            delete=False,
+        ) as temporary_file:
+            temporary_path = Path(temporary_file.name)
+            send_response(connection, {"ok": True, "ready": True})
+
+            remaining = size
+            while remaining:
+                chunk = reader.read(min(CHUNK_SIZE, remaining))
+                if not chunk:
+                    raise ConnectionError("Client disconnected before upload completed.")
+                temporary_file.write(chunk)
+                remaining -= len(chunk)
+
+        if overwrite:
+            os.replace(temporary_path, destination)
+        else:
+            # Linking fails atomically if another client created the name meanwhile.
+            os.link(temporary_path, destination)
+            temporary_path.unlink()
+        temporary_path = None
+        send_response(connection, {"ok": True, "message": f"Uploaded {filename} ({size} bytes)."})
+    except FileExistsError:
+        send_response(connection, {"ok": False, "error": "File already exists."})
+    except OSError as error:
+        print(f"Upload of {filename} failed: {error}")
+        try:
+            send_response(connection, {"ok": False, "error": "Upload failed on the server."})
+        except OSError as send_error:
+            print(f"Could not send upload error to {filename}: {send_error}")
+    finally:
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError as error:
+                print(f"Could not remove temporary upload {temporary_path}: {error}")
 
 
 def handle_client(connection, address):
@@ -17,10 +97,13 @@ def handle_client(connection, address):
         with connection.makefile("rb") as reader:
             request = reader.readline(4097)
             if not request.endswith(b"\n") or len(request) > 4096:
-                response = {
-                    "ok": False,
-                    "error": "Request must be a command of at most 4095 bytes.",
-                }
+                send_response(
+                    connection,
+                    {
+                        "ok": False,
+                        "error": "Request must be a command of at most 4095 bytes.",
+                    },
+                )
             elif request.strip().upper() == b"DIR":
                 try:
                     entries = []
@@ -35,14 +118,28 @@ def handle_client(connection, address):
                             entry["size_bytes"] = item.stat().st_size
                         entries.append(entry)
                     entries.sort(key=lambda entry: entry["name"].casefold())
-                    response = {"ok": True, "entries": entries}
+                    send_response(connection, {"ok": True, "entries": entries})
                 except OSError as error:
                     print(f"Could not list storage directory {STORAGE_DIR}: {error}")
-                    response = {"ok": False, "error": "Could not list server storage."}
+                    send_response(
+                        connection,
+                        {"ok": False, "error": "Could not list server storage."},
+                    )
+            elif request.startswith(b"{"):
+                try:
+                    upload_request = json.loads(request.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    send_response(connection, {"ok": False, "error": "Invalid JSON request."})
+                    return
+                if not isinstance(upload_request, dict) or upload_request.get("command") != "UPLOAD":
+                    send_response(connection, {"ok": False, "error": "Unsupported command."})
+                else:
+                    receive_upload(connection, reader, upload_request)
             else:
-                response = {"ok": False, "error": "Unsupported command. Try DIR."}
-
-            connection.sendall((json.dumps(response) + "\n").encode("utf-8"))
+                send_response(
+                    connection,
+                    {"ok": False, "error": "Unsupported command. Try DIR or UPLOAD."},
+                )
 
 
 def main():
