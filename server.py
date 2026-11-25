@@ -20,19 +20,23 @@ STORAGE_DIR = Path(
 def send_response(connection, response):
     connection.sendall((json.dumps(response) + "\n").encode("utf-8"))
 
+
+def valid_filename(filename):
+    return (
+        isinstance(filename, str)
+        and filename not in {"", ".", ".."}
+        and "/" not in filename
+        and "\\" not in filename
+        and "\0" not in filename
+    )
+
+
 # receive the upload, write to temp file, move to storage, send response
 def receive_upload(connection, reader, request):
     filename = request.get("filename")
     size = request.get("size")
     overwrite = request.get("overwrite", False)
-    if (
-        not isinstance(filename, str)
-        or not filename
-        or filename in {".", ".."}
-        or "/" in filename
-        or "\\" in filename
-        or "\0" in filename
-    ):
+    if not valid_filename(filename):
         send_response(connection, {"ok": False, "error": "Invalid filename."})
         return
     if type(size) is not int or size < 0:
@@ -94,6 +98,44 @@ def receive_upload(connection, reader, request):
             except OSError as error:
                 print(f"Could not remove temporary upload {temporary_path}: {error}")
 
+
+def send_download(connection, filename):
+    if not valid_filename(filename):
+        send_response(connection, {"ok": False, "error": "Invalid filename."})
+        return
+
+    source = STORAGE_DIR / filename
+    if source.is_symlink() or not source.is_file():
+        send_response(connection, {"ok": False, "error": "File not found."})
+        return
+
+    try:
+        source_file = source.open("rb")
+        size = source.stat().st_size
+    except FileNotFoundError:
+        send_response(connection, {"ok": False, "error": "File not found."})
+        return
+    except OSError as error:
+        print(f"Download of {filename} failed: {error}")
+        send_response(connection, {"ok": False, "error": "Could not read server file."})
+        return
+
+    with source_file:
+        send_response(connection, {"ok": True, "size": size})
+        remaining = size
+        while remaining:
+            chunk = source_file.read(min(CHUNK_SIZE, remaining))
+            if not chunk:
+                print(f"Download of {filename} stopped because the source file changed.")
+                return
+            try:
+                connection.sendall(chunk)
+            except OSError as error:
+                print(f"Sending {filename} to the client failed: {error}")
+                return
+            remaining -= len(chunk)
+
+
 # connect and handle client requests, new thread per client
 def handle_client(connection, address):
     print(f"Connected by {address}")
@@ -135,14 +177,18 @@ def handle_client(connection, address):
                 except (UnicodeDecodeError, json.JSONDecodeError):
                     send_response(connection, {"ok": False, "error": "Invalid JSON request."})
                     return
-                if not isinstance(upload_request, dict) or upload_request.get("command") != "UPLOAD":
-                    send_response(connection, {"ok": False, "error": "Unsupported command."})
-                else:
+                if not isinstance(upload_request, dict):
+                    send_response(connection, {"ok": False, "error": "Invalid JSON request."})
+                elif upload_request.get("command") == "UPLOAD":
                     receive_upload(connection, reader, upload_request)
+                elif upload_request.get("command") == "DOWNLOAD":
+                    send_download(connection, upload_request.get("filename"))
+                else:
+                    send_response(connection, {"ok": False, "error": "Unsupported command."})
             else:
                 send_response(
                     connection,
-                    {"ok": False, "error": "Unsupported command. Try DIR or UPLOAD."},
+                    {"ok": False, "error": "Unsupported command. Try DIR, UPLOAD, or DOWNLOAD."},
                 )
 
 # driver code
