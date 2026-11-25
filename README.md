@@ -13,13 +13,32 @@ and support for a myriad of file types.
 - The client & server will have approriate forms of error handling for smooth operation.
 - Development of the system will be monitored via Github Remote VCS.
 - ### Server updates:
-   - added barebones test code. requires fastapi and uvicorn to be installed with `pip install fastapi uvicorn python-multipart`
-   - can be run with ``python -m uvicorn main:app --reload`` (only tested on personal computer, not in console VM yet)
+   - 2026-11-15 added barebones test code.
+   - 2026-11-24 undid everything and restart. build things from ground up, starting with connecting server.py (uploaded to google cloud vm) and client.py (running on a personal computer)
+   - 2026-11-24 server creates a storage directory server.py
+   - 2026-11-25 client can upload files to the storage directory via server.py
 
 ## Requirements
 - Text files must be under 25 MB
 - Audio files must be under 0.5 GB
 - Video files must be under 2 GB
 
+## To run (only supports `DIR` and `UPLOAD` currently)
+
+```bash
+python3 server.py
+```
+The server stores files in `/mnt/disks/file-storage` by default. Set
+`FILE_STORAGE_DIR` to use another directory:
+
+```bash
+FILE_STORAGE_DIR=/directory/path python3 server.py
+```
+Set the full directory to work properly, not just the directory the command is run in.
+
+Enter `DIR` in the client to list server files. Use `UPLOAD <local-file-path>`
+to send a file; only the local file's name is stored on the server. If a file
+with that name already exists, the client asks before overwriting it. The
+client connects to the server's external IP on TCP port `3300`;
 ## Process Overview
 ![Process Overview](images/processoverview.png)

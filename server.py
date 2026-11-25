@@ -1,56 +1,168 @@
-# barebones server code, untested and does not do anything we need it to do yet
-# uses fastapi and uvicorn
+# created 2026-11-04 by dani/Androtis, remade 2026-11-23 by hosevana
+# last modified: 2026-11-24 by hosevana
+# server driver code, ran on gcp compute engine
+# untested as of 2026-11-24
+import json
+import os
+import socket
+import tempfile
+import threading
 from pathlib import Path
-import re
-from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+HOST = "0.0.0.0"
+PORT = 3300
+CHUNK_SIZE = 64 * 1024
+STORAGE_DIR = Path(
+    os.environ.get("FILE_STORAGE_DIR", "/mnt/disks/file-storage")
+).expanduser().resolve()
 
-app = FastAPI()
-UPLOAD_DIR = Path(__file__).parent / "uploads"
-UPLOAD_DIR.mkdir(exist_ok=True)
+# send response function
+def send_response(connection, response):
+    connection.sendall((json.dumps(response) + "\n").encode("utf-8"))
 
-EXTENSIONS = {".txt": "TS", ".mp4": "VS"}
+# receive the upload, write to temp file, move to storage, send response
+def receive_upload(connection, reader, request):
+    filename = request.get("filename")
+    size = request.get("size")
+    overwrite = request.get("overwrite", False)
+    if (
+        not isinstance(filename, str)
+        or not filename
+        or filename in {".", ".."}
+        or "/" in filename
+        or "\\" in filename
+        or "\0" in filename
+    ):
+        send_response(connection, {"ok": False, "error": "Invalid filename."})
+        return
+    if type(size) is not int or size < 0:
+        send_response(connection, {"ok": False, "error": "Invalid file size."})
+        return
+    if not isinstance(overwrite, bool):
+        send_response(connection, {"ok": False, "error": "Invalid overwrite option."})
+        return
 
+    destination = STORAGE_DIR / filename
+    destination_exists = destination.exists() or destination.is_symlink()
+    if destination.is_dir():
+        send_response(connection, {"ok": False, "error": "A directory with that name exists."})
+        return
+    if destination_exists and not overwrite:
+        send_response(connection, {"ok": False, "exists": True, "error": "File already exists."})
+        return
 
-@app.get("/health")
-def health():
-    return {"status": "ok"}
-
-# uploading files barebones test
-@app.post("/files", status_code=201)
-async def upload_file(file: UploadFile):
-    extension = Path(file.filename or "").suffix.lower()
-    prefix = EXTENSIONS.get(extension)
-    if prefix is None:
-        raise HTTPException(status_code=400, detail="Only .txt and .mp4 files are supported")
-
-    # uploads a unique filename by using prefixes to denote filetype and a hex uuid
-    file_id = f"{prefix}-{uuid4().hex}"
-    destination = UPLOAD_DIR / f"{file_id}{extension}"
-
+    temporary_path = None
     try:
-        with destination.open("wb") as output:
-            while chunk := await file.read(1024 * 1024):
-                output.write(chunk)
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=STORAGE_DIR,
+            prefix=".upload-",
+            suffix=".tmp",
+            delete=False,
+        ) as temporary_file:
+            temporary_path = Path(temporary_file.name)
+            send_response(connection, {"ok": True, "ready": True})
+
+            remaining = size
+            while remaining:
+                chunk = reader.read(min(CHUNK_SIZE, remaining))
+                if not chunk:
+                    raise ConnectionError("Client disconnected before upload completed.")
+                temporary_file.write(chunk)
+                remaining -= len(chunk)
+
+        if overwrite:
+            os.replace(temporary_path, destination)
+        else:
+            # Linking fails atomically if another client created the name meanwhile.
+            os.link(temporary_path, destination)
+            temporary_path.unlink()
+        temporary_path = None
+        send_response(connection, {"ok": True, "message": f"Uploaded {filename} ({size} bytes)."})
+    except FileExistsError:
+        send_response(connection, {"ok": False, "error": "File already exists."})
+    except OSError as error:
+        print(f"Upload of {filename} failed: {error}")
+        try:
+            send_response(connection, {"ok": False, "error": "Upload failed on the server."})
+        except OSError as send_error:
+            print(f"Could not send upload error to {filename}: {send_error}")
     finally:
-        await file.close()
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError as error:
+                print(f"Could not remove temporary upload {temporary_path}: {error}")
 
-    return {"id": file_id, "name": destination.name}
+# connect and handle client requests, new thread per client
+def handle_client(connection, address):
+    print(f"Connected by {address}")
+    with connection:
+        with connection.makefile("rb") as reader:
+            request = reader.readline(4097)
+            if not request.endswith(b"\n") or len(request) > 4096:
+                send_response(
+                    connection,
+                    {
+                        "ok": False,
+                        "error": "Request must be a command of at most 4095 bytes.",
+                    },
+                )
+            elif request.strip().upper() == b"DIR":
+                try:
+                    entries = []
+                    for item in STORAGE_DIR.iterdir():
+                        if item.is_symlink():
+                            continue
+                        entry = {
+                            "name": item.name,
+                            "type": "directory" if item.is_dir() else "file",
+                        }
+                        if item.is_file():
+                            entry["size_bytes"] = item.stat().st_size
+                        entries.append(entry)
+                    entries.sort(key=lambda entry: entry["name"].casefold())
+                    send_response(connection, {"ok": True, "entries": entries})
+                except OSError as error:
+                    print(f"Could not list storage directory {STORAGE_DIR}: {error}")
+                    send_response(
+                        connection,
+                        {"ok": False, "error": "Could not list server storage."},
+                    )
+            elif request.startswith(b"{"):
+                try:
+                    upload_request = json.loads(request.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    send_response(connection, {"ok": False, "error": "Invalid JSON request."})
+                    return
+                if not isinstance(upload_request, dict) or upload_request.get("command") != "UPLOAD":
+                    send_response(connection, {"ok": False, "error": "Unsupported command."})
+                else:
+                    receive_upload(connection, reader, upload_request)
+            else:
+                send_response(
+                    connection,
+                    {"ok": False, "error": "Unsupported command. Try DIR or UPLOAD."},
+                )
 
-# barebones code of downloading files
-@app.get("/files/{file_id}")
-def download_file(file_id: str):
-    if not re.fullmatch(r"(?:TS|VS)-[0-9a-f]{32}", file_id):
-        raise HTTPException(status_code=404, detail="File not found")
-    # this code woudl only work with .txt and .mp4, we will need to add more
-    # i just started with the two bc if we can get two working we can get more
-    prefix = file_id[:2]
-    extension = ".txt" if prefix == "TS" else ".mp4"
-    path = UPLOAD_DIR / f"{file_id}{extension}"
+# driver code
+def main():
+    STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+    print(f"File storage: {STORAGE_DIR}")
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
+        server.bind((HOST, PORT))
+        server.listen()
+        print(f"Listening on {HOST}:{PORT}")
 
-    if not path.is_file():
-        raise HTTPException(status_code=404, detail="File not found")
+        while True:
+            connection, address = server.accept()
+            thread = threading.Thread(
+                target=handle_client,
+                args=(connection, address),
+                daemon=True,
+            )
+            thread.start()
 
-    return FileResponse(path, filename=path.name)
+
+if __name__ == "__main__":
+    main()
