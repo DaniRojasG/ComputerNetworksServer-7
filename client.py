@@ -4,7 +4,9 @@
 # client driver code, ran on pc
 # untested as of 2026-11-24
 import json
+import os
 import socket
+import tempfile
 from pathlib import Path
 
 # client and server should match port
@@ -80,10 +82,79 @@ def upload_file(file_path):
     else:
         print(f"Server error: {response['error']}")
 
+
+def download_file(filename):
+    if (
+        not filename
+        or filename in {".", ".."}
+        or "/" in filename
+        or "\\" in filename
+        or "\0" in filename
+    ):
+        print("Enter a filename from the server directory, not a path.")
+        return
+
+    destination = Path.cwd() / filename
+    if destination.is_dir():
+        print(f"A directory named {filename} already exists here.")
+        return
+    if destination.exists():
+        confirmation = input(
+            f"{destination} already exists. Overwrite? [y/N]: "
+        ).strip().lower()
+        if confirmation not in {"y", "yes"}:
+            print("Download cancelled.")
+            return
+
+    request = {"command": "DOWNLOAD", "filename": filename}
+    temporary_path = None
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client_tcp:
+            client_tcp.connect((host, port))
+            with client_tcp.makefile("rb") as response_file:
+                client_tcp.sendall((json.dumps(request) + "\n").encode("utf-8"))
+                response = json.loads(response_file.readline().decode("utf-8"))
+                if not response.get("ok"):
+                    print(f"Server error: {response['error']}")
+                    return
+
+                size = response.get("size")
+                if type(size) is not int or size < 0:
+                    raise OSError("Server returned an invalid file size.")
+
+                with tempfile.NamedTemporaryFile(
+                    mode="wb",
+                    dir=destination.parent,
+                    prefix=f".{filename}.",
+                    suffix=".part",
+                    delete=False,
+                ) as temporary_file:
+                    temporary_path = Path(temporary_file.name)
+                    remaining = size
+                    while remaining:
+                        chunk = response_file.read(min(CHUNK_SIZE, remaining))
+                        if not chunk:
+                            raise OSError("Connection ended before the download completed.")
+                        temporary_file.write(chunk)
+                        remaining -= len(chunk)
+
+        os.replace(temporary_path, destination)
+        temporary_path = None
+        print(f"Downloaded {filename} to {destination}")
+    finally:
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError as error:
+                print(f"Could not remove temporary download {temporary_path}: {error}")
+
+
 # driver code
 if __name__ == '__main__':
     while True:
-        command = input('Enter DIR, UPLOAD <local-file-path>, or q to quit: ').strip()
+        command = input(
+            'Enter DIR, UPLOAD <local-file-path>, DOWNLOAD <filename>, or q to quit: '
+        ).strip()
         if command.lower() == 'q':
             break
         try:
@@ -95,7 +166,16 @@ if __name__ == '__main__':
                 if len(file_path) >= 2 and file_path[0] == file_path[-1] and file_path[0] in {"'", '"'}:
                     file_path = file_path[1:-1]
                 upload_file(file_path)
+            elif operation.upper() == "DOWNLOAD" and separator and argument.strip():
+                filename = argument.strip()
+                if (
+                    len(filename) >= 2
+                    and filename[0] == filename[-1]
+                    and filename[0] in {"'", '"'}
+                ):
+                    filename = filename[1:-1]
+                download_file(filename)
             else:
-                print("Use DIR or UPLOAD <local-file-path>.")
+                print("Use DIR, UPLOAD <local-file-path>, or DOWNLOAD <filename>.")
         except OSError as error:
             print(f"Request failed: {error}")
