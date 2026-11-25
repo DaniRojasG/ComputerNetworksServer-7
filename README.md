@@ -17,6 +17,7 @@ and support for a myriad of file types.
    - 2026-11-24 undid everything and restart. build things from ground up, starting with connecting server.py (uploaded to google cloud vm) and client.py (running on a personal computer)
    - 2026-11-24 server creates a storage directory server.py
    - 2026-11-25 client can upload files to the storage directory via server.py
+   - 2026-11-25 client can download files from the storage directory
 
 ## Requirements
 - Text files must be under 25 MB
