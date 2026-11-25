@@ -1,14 +1,18 @@
 # Client Code
+# initially commited 2026-11-04 by dani/Androtis, created 2026-11-23 by hosevana
+# last modified 2026-11-24 by hosevana
+# client driver code, ran on pc
+# untested as of 2026-11-24
 import json
 import socket
 from pathlib import Path
 
 # client and server should match port
-host = '34.71.48.46'
+host = '34.16.58.20'
 port = 3300
 CHUNK_SIZE = 64 * 1024
 
-
+# setup connection to server, send command, print response
 def setup_connection(command):
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client_tcp:
         client_tcp.connect((host, port))
@@ -26,7 +30,7 @@ def setup_connection(command):
             size = f" ({entry['size_bytes']} bytes)" if "size_bytes" in entry else ""
             print(f"{entry['name']}{suffix}{size}")
 
-
+# transfer upload function, send file to server, return response
 def transfer_upload(file_path, overwrite=False):
     source = Path(file_path).expanduser()
     if not source.is_file():
@@ -59,7 +63,7 @@ def transfer_upload(file_path, overwrite=False):
 
             return json.loads(response_file.readline().decode("utf-8"))
 
-
+# upload file function, confirm overwrite if file already exists, call transfer_upload
 def upload_file(file_path):
     response = transfer_upload(file_path)
     if response.get("exists"):
@@ -76,7 +80,7 @@ def upload_file(file_path):
     else:
         print(f"Server error: {response['error']}")
 
-
+# driver code
 if __name__ == '__main__':
     while True:
         command = input('Enter DIR, UPLOAD <local-file-path>, or q to quit: ').strip()

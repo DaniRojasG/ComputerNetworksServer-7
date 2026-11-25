@@ -16,6 +16,7 @@ and support for a myriad of file types.
    - 2026-11-15 added barebones test code.
    - 2026-11-24 undid everything and restart. build things from ground up, starting with connecting server.py (uploaded to google cloud vm) and client.py (running on a personal computer)
    - 2026-11-24 server creates a storage directory server.py
+   - 2026-11-25 client can upload files to the storage directory via server.py
 
 ## Requirements
 - Text files must be under 25 MB
@@ -33,13 +34,11 @@ The server stores files in `/mnt/disks/file-storage` by default. Set
 ```bash
 FILE_STORAGE_DIR=/directory/path python3 server.py
 ```
+Set the full directory to work properly, not just the directory the command is run in.
 
 Enter `DIR` in the client to list server files. Use `UPLOAD <local-file-path>`
 to send a file; only the local file's name is stored on the server. If a file
 with that name already exists, the client asks before overwriting it. The
-client connects to the server's external IP on TCP port `3300`; allow that
-port in the Google Cloud firewall, scoped to your computer's public IP where
-possible. Upload and directory listing are unauthenticated, so do not expose
-this prototype broadly to the internet.
+client connects to the server's external IP on TCP port `3300`;
 ## Process Overview
 ![Process Overview](images/processoverview.png)

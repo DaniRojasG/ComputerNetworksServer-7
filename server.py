@@ -1,3 +1,7 @@
+# created 2026-11-04 by dani/Androtis, remade 2026-11-23 by hosevana
+# last modified: 2026-11-24 by hosevana
+# server driver code, ran on gcp compute engine
+# untested as of 2026-11-24
 import json
 import os
 import socket
@@ -12,11 +16,11 @@ STORAGE_DIR = Path(
     os.environ.get("FILE_STORAGE_DIR", "/mnt/disks/file-storage")
 ).expanduser().resolve()
 
-
+# send response function
 def send_response(connection, response):
     connection.sendall((json.dumps(response) + "\n").encode("utf-8"))
 
-
+# receive the upload, write to temp file, move to storage, send response
 def receive_upload(connection, reader, request):
     filename = request.get("filename")
     size = request.get("size")
@@ -90,7 +94,7 @@ def receive_upload(connection, reader, request):
             except OSError as error:
                 print(f"Could not remove temporary upload {temporary_path}: {error}")
 
-
+# connect and handle client requests, new thread per client
 def handle_client(connection, address):
     print(f"Connected by {address}")
     with connection:
@@ -141,7 +145,7 @@ def handle_client(connection, address):
                     {"ok": False, "error": "Unsupported command. Try DIR or UPLOAD."},
                 )
 
-
+# driver code
 def main():
     STORAGE_DIR.mkdir(parents=True, exist_ok=True)
     print(f"File storage: {STORAGE_DIR}")
