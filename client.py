@@ -10,7 +10,7 @@ import tempfile
 from pathlib import Path
 
 # client and server should match port
-host = '34.16.58.20'
+host = '34.9.15.231'
 port = 3300
 CHUNK_SIZE = 64 * 1024
 
