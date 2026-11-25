@@ -40,7 +40,11 @@ Enter `DIR` in the client to list server files. Use `UPLOAD <local-file-path>`
 to send a file; only the local file's name is stored on the server. If a file
 with that name already exists, the client asks before overwriting it. Use
 `DOWNLOAD <filename>` to save a server file to the directory where you started
-the client; the client asks before replacing an existing local file.
+the client; the client asks before replacing an existing local file. Manage
+server folders with `SUBFOLDER CREATE <path>` and
+`SUBFOLDER DELETE <path>`, using paths relative to server storage (for example
+`SUBFOLDER CREATE reports/weekly`). Delete only removes empty folders; remove
+their files and subfolders first.
 
 The client connects to the server's external IP on TCP port `3300`.
 ## Process Overview

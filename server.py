@@ -2,6 +2,7 @@
 # last modified: 2026-11-24 by hosevana
 # server driver code, ran on gcp compute engine
 # untested as of 2026-11-24
+import errno
 import json
 import os
 import socket
@@ -29,6 +30,76 @@ def valid_filename(filename):
         and "\\" not in filename
         and "\0" not in filename
     )
+
+
+def resolve_storage_path(relative_path):
+    if not isinstance(relative_path, str) or not relative_path.strip():
+        raise ValueError("Enter a server-relative folder path.")
+
+    normalized = relative_path.strip().replace("\\", "/")
+    if normalized.startswith("/"):
+        raise ValueError("Folder paths must be relative to server storage.")
+    normalized = normalized.rstrip("/")
+    parts = normalized.split("/")
+    if (
+        not normalized
+        or any(part in {"", ".", ".."} for part in parts)
+        or (len(parts[0]) >= 2 and parts[0][1] == ":")
+    ):
+        raise ValueError("Invalid folder path.")
+
+    storage_root = STORAGE_DIR.resolve()
+    candidate = storage_root
+    for part in parts:
+        candidate = candidate / part
+        if candidate.is_symlink():
+            raise ValueError("Folder paths cannot pass through symbolic links.")
+
+    resolved = candidate.resolve()
+    try:
+        resolved.relative_to(storage_root)
+    except ValueError as error:
+        raise ValueError("Folder path must remain inside server storage.") from error
+    return resolved
+
+
+def handle_subfolder(connection, request):
+    action = request.get("action")
+    if not isinstance(action, str) or action.upper() not in {"CREATE", "DELETE"}:
+        send_response(connection, {"ok": False, "error": "Use CREATE or DELETE."})
+        return
+    action = action.upper()
+
+    try:
+        folder = resolve_storage_path(request.get("path"))
+    except ValueError as error:
+        send_response(connection, {"ok": False, "error": str(error)})
+        return
+
+    try:
+        if action == "CREATE":
+            folder.mkdir(parents=True, exist_ok=False)
+            send_response(connection, {"ok": True, "message": f"Created {request['path']}."})
+        else:
+            if not folder.is_dir():
+                send_response(connection, {"ok": False, "error": "Subfolder not found."})
+                return
+            folder.rmdir()
+            send_response(connection, {"ok": True, "message": f"Deleted empty folder {request['path']}."})
+    except FileExistsError:
+        send_response(connection, {"ok": False, "error": "That path already exists."})
+    except FileNotFoundError:
+        send_response(connection, {"ok": False, "error": "Subfolder not found."})
+    except OSError as error:
+        print(f"Could not {action.lower()} subfolder {request.get('path')}: {error}")
+        if action == "DELETE" and (
+            error.errno in {errno.ENOTEMPTY, errno.EEXIST}
+            or getattr(error, "winerror", None) == 145
+        ):
+            message = "Folder is not empty; remove its contents first."
+        else:
+            message = f"Could not {action.lower()} subfolder. Check server permissions."
+        send_response(connection, {"ok": False, "error": message})
 
 
 # receive the upload, write to temp file, move to storage, send response
@@ -183,12 +254,17 @@ def handle_client(connection, address):
                     receive_upload(connection, reader, upload_request)
                 elif upload_request.get("command") == "DOWNLOAD":
                     send_download(connection, upload_request.get("filename"))
+                elif upload_request.get("command") == "SUBFOLDER":
+                    handle_subfolder(connection, upload_request)
                 else:
                     send_response(connection, {"ok": False, "error": "Unsupported command."})
             else:
                 send_response(
                     connection,
-                    {"ok": False, "error": "Unsupported command. Try DIR, UPLOAD, or DOWNLOAD."},
+                    {
+                        "ok": False,
+                        "error": "Unsupported command. Try DIR, UPLOAD, DOWNLOAD, or SUBFOLDER.",
+                    },
                 )
 
 # driver code

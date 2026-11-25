@@ -94,7 +94,9 @@ def download_file(filename):
         print("Enter a filename from the server directory, not a path.")
         return
 
-    destination = Path.cwd() / filename
+    download_dir = Path.home() / "Downloads"
+    download_dir.mkdir(parents=True, exist_ok=True)
+    destination = download_dir / filename
     if destination.is_dir():
         print(f"A directory named {filename} already exists here.")
         return
@@ -149,11 +151,30 @@ def download_file(filename):
                 print(f"Could not remove temporary download {temporary_path}: {error}")
 
 
+def subfolder_command(action, folder_path):
+    request = {
+        "command": "SUBFOLDER",
+        "action": action.upper(),
+        "path": folder_path,
+    }
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client_tcp:
+        client_tcp.connect((host, port))
+        client_tcp.sendall((json.dumps(request) + "\n").encode("utf-8"))
+        with client_tcp.makefile("rb") as response_file:
+            response = json.loads(response_file.readline().decode("utf-8"))
+
+    if response["ok"]:
+        print(response["message"])
+    else:
+        print(f"Server error: {response['error']}")
+
+
 # driver code
 if __name__ == '__main__':
     while True:
         command = input(
-            'Enter DIR, UPLOAD <local-file-path>, DOWNLOAD <filename>, or q to quit: '
+            'Enter DIR, UPLOAD <local-file-path>, DOWNLOAD <filename>, '
+            'SUBFOLDER CREATE|DELETE <path>, or q to quit: '
         ).strip()
         if command.lower() == 'q':
             break
@@ -175,7 +196,23 @@ if __name__ == '__main__':
                 ):
                     filename = filename[1:-1]
                 download_file(filename)
+            elif operation.upper() == "SUBFOLDER" and separator and argument.strip():
+                action, action_separator, folder_path = argument.strip().partition(" ")
+                if action_separator and folder_path.strip():
+                    folder_path = folder_path.strip()
+                    if (
+                        len(folder_path) >= 2
+                        and folder_path[0] == folder_path[-1]
+                        and folder_path[0] in {"'", '"'}
+                    ):
+                        folder_path = folder_path[1:-1]
+                    subfolder_command(action, folder_path)
+                else:
+                    print("Use SUBFOLDER CREATE <path> or SUBFOLDER DELETE <path>.")
             else:
-                print("Use DIR, UPLOAD <local-file-path>, or DOWNLOAD <filename>.")
+                print(
+                    "Use DIR, UPLOAD <local-file-path>, DOWNLOAD <filename>, "
+                    "or SUBFOLDER CREATE|DELETE <path>."
+                )
         except OSError as error:
             print(f"Request failed: {error}")
