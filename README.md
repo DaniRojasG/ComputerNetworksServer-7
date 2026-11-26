@@ -38,8 +38,13 @@ FILE_STORAGE_DIR=/directory/path python3 server.py
 Set the full directory to work properly, not just the directory the command is run in.
 
 Enter `DIR` in the client to list server files. Use `UPLOAD <local-file-path>`
-to send a file; only the local file's name is stored on the server. If a file
-with that name already exists, the client asks before overwriting it. Use
+to send a file. The server assigns a unique type-based name and preserves the
+file extension: `TS` for text, `AS` for audio, `VS` for video, `IS` for images,
+and `OS` for other extensions (for example, `TS001.txt`). Uploading the same
+source again creates a new numbered server filename. Upload filenames that
+contain Windows-invalid characters, are reserved device names, end in a space
+or period, or exceed 255 UTF-8 bytes are rejected; rename the local file and
+retry. Both client and server validate the original name. Use
 `DOWNLOAD <filename>` to save a server file to the client's Downloads folder;
 the client asks before replacing an existing local file. Use `DELETE <filename>`
 to remove a file from the current server directory; the client confirms first.
