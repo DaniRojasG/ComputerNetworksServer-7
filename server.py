@@ -1,7 +1,8 @@
 # created 2026-11-04 by dani/Androtis, remade 2026-11-23 by hosevana
-# last modified: 2026-11-24 by hosevana
+# last modified: 2026-11-25 by hosevana
 # server driver code, ran on gcp compute engine
-# untested as of 2026-11-24
+# working of 2026-11-25
+import errno
 import json
 import os
 import socket
@@ -20,7 +21,7 @@ STORAGE_DIR = Path(
 def send_response(connection, response):
     connection.sendall((json.dumps(response) + "\n").encode("utf-8"))
 
-
+# validate filename
 def valid_filename(filename):
     return (
         isinstance(filename, str)
@@ -30,6 +31,194 @@ def valid_filename(filename):
         and "\0" not in filename
     )
 
+# ensure filepath is valid and inside storage, return resolved path
+def resolve_storage_path(relative_path, allow_root=False):
+    storage_root = STORAGE_DIR.resolve()
+    if not isinstance(relative_path, str):
+        raise ValueError("Folder path must be text.")
+    normalized = relative_path.strip().replace("\\", "/")
+    if allow_root and normalized in {"", "."}:
+        return storage_root
+    if normalized.startswith("/"):
+        raise ValueError("Folder paths must be relative to server storage.")
+    normalized = normalized.rstrip("/")
+    parts = normalized.split("/")
+    if (
+        not normalized
+        or any(part in {"", ".", ".."} for part in parts)
+        or (len(parts[0]) >= 2 and parts[0][1] == ":")
+    ):
+        raise ValueError("Invalid folder path.")
+
+    candidate = storage_root
+    for part in parts:
+        candidate = candidate / part
+        if candidate.is_symlink():
+            raise ValueError("Folder paths cannot pass through symbolic links.")
+
+    resolved = candidate.resolve()
+    try:
+        resolved.relative_to(storage_root)
+    except ValueError as error:
+        raise ValueError("Folder path must remain inside server storage.") from error
+    return resolved
+
+# check if the current directory exists
+def resolve_current_directory(relative_path):
+    directory = resolve_storage_path(relative_path, allow_root=True)
+    if not directory.is_dir():
+        raise FileNotFoundError("Server directory not found.")
+    return directory
+
+# return the relative path of a directory
+def relative_storage_path(directory):
+    relative = directory.relative_to(STORAGE_DIR.resolve())
+    return "" if relative == Path(".") else relative.as_posix()
+
+# create or delete a subfolder in the server storage
+def handle_subfolder(connection, request):
+    action = request.get("action")
+    if not isinstance(action, str) or action.upper() not in {"CREATE", "DELETE"}:
+        send_response(connection, {"ok": False, "error": "Use CREATE or DELETE."})
+        return
+    action = action.upper()
+
+    try:
+        current_directory = resolve_current_directory(request.get("directory", ""))
+        base_path = relative_storage_path(current_directory)
+        requested_path = request.get("path")
+        if not isinstance(requested_path, str):
+            raise ValueError("Folder path must be text.")
+        combined_path = (
+            f"{base_path}/{requested_path}" if base_path else requested_path
+        )
+        folder = resolve_storage_path(combined_path)
+    except ValueError as error:
+        send_response(connection, {"ok": False, "error": str(error)})
+        return
+    except FileNotFoundError as error:
+        send_response(connection, {"ok": False, "error": str(error)})
+        return
+
+    try:
+        if action == "CREATE":
+            folder.mkdir(parents=True, exist_ok=False)
+            send_response(connection, {"ok": True, "message": f"Created {request['path']}."})
+        else:
+            if not folder.is_dir():
+                send_response(connection, {"ok": False, "error": "Subfolder not found."})
+                return
+            folder.rmdir()
+            send_response(connection, {"ok": True, "message": f"Deleted empty folder {request['path']}."})
+    except FileExistsError:
+        send_response(connection, {"ok": False, "error": "That path already exists."})
+    except FileNotFoundError:
+        send_response(connection, {"ok": False, "error": "Subfolder not found."})
+    except OSError as error:
+        print(f"Could not {action.lower()} subfolder {request.get('path')}: {error}")
+        if action == "DELETE" and (
+            error.errno in {errno.ENOTEMPTY, errno.EEXIST}
+            or getattr(error, "winerror", None) == 145
+        ):
+            message = "Folder is not empty; remove its contents first."
+        else:
+            message = f"Could not {action.lower()} subfolder. Check server permissions."
+        send_response(connection, {"ok": False, "error": message})
+
+# list the current directory
+def list_directory(connection, request):
+    try:
+        directory = resolve_current_directory(request.get("directory", ""))
+        entries = []
+        for item in directory.iterdir():
+            if item.is_symlink():
+                continue
+            entry = {
+                "name": item.name,
+                "type": "directory" if item.is_dir() else "file",
+            }
+            if item.is_file():
+                entry["size_bytes"] = item.stat().st_size
+            entries.append(entry)
+        entries.sort(key=lambda entry: entry["name"].casefold())
+        send_response(
+            connection,
+            {
+                "ok": True,
+                "path": relative_storage_path(directory),
+                "entries": entries,
+            },
+        )
+    except (ValueError, FileNotFoundError) as error:
+        send_response(connection, {"ok": False, "error": str(error)})
+    except OSError as error:
+        print(f"Could not list server directory: {error}")
+        send_response(connection, {"ok": False, "error": "Could not list server directory."})
+
+# change the current directory, upwards or downwards
+def change_directory(connection, request):
+    try:
+        current_directory = resolve_current_directory(request.get("directory", ""))
+        target = request.get("path")
+        if not isinstance(target, str):
+            raise ValueError("Directory path must be text.")
+
+        normalized_target = target.strip().replace("\\", "/")
+        if normalized_target == "/":
+            parts = []
+        elif normalized_target.startswith("/"):
+            raise ValueError("Use a path relative to the current server directory.")
+        else:
+            parts = list(
+                relative_storage_path(current_directory).split("/")
+                if relative_storage_path(current_directory)
+                else []
+            )
+            for part in normalized_target.split("/"):
+                if part in {"", "."}:
+                    continue
+                if part == "..":
+                    if parts:
+                        parts.pop()
+                elif len(part) >= 2 and part[1] == ":":
+                    raise ValueError("Use a path relative to the current server directory.")
+                else:
+                    parts.append(part)
+
+        target_path = resolve_storage_path("/".join(parts), allow_root=True)
+        if not target_path.is_dir():
+            send_response(connection, {"ok": False, "error": "Directory not found."})
+            return
+        path = relative_storage_path(target_path)
+        send_response(connection, {"ok": True, "path": path})
+    except (ValueError, FileNotFoundError) as error:
+        send_response(connection, {"ok": False, "error": str(error)})
+
+# delete a file
+def delete_file(connection, request):
+    filename = request.get("filename")
+    if not valid_filename(filename):
+        send_response(connection, {"ok": False, "error": "Invalid filename."})
+        return
+
+    try:
+        directory = resolve_current_directory(request.get("directory", ""))
+    except (ValueError, FileNotFoundError) as error:
+        send_response(connection, {"ok": False, "error": str(error)})
+        return
+
+    target = directory / filename
+    if target.is_symlink() or not target.is_file():
+        send_response(connection, {"ok": False, "error": "File not found."})
+        return
+    try:
+        target.unlink()
+        send_response(connection, {"ok": True, "message": f"Deleted {filename}."})
+    except FileNotFoundError:
+        send_response(connection, {"ok": False, "error": "File not found."})
+    except OSError as error:
+        print(f"Could not delete file {target}: {error}")
+        send_response(connection, {"ok": False, "error": "Could not delete server file."})
 
 # receive the upload, write to temp file, move to storage, send response
 def receive_upload(connection, reader, request):
@@ -46,7 +235,13 @@ def receive_upload(connection, reader, request):
         send_response(connection, {"ok": False, "error": "Invalid overwrite option."})
         return
 
-    destination = STORAGE_DIR / filename
+    try:
+        directory = resolve_current_directory(request.get("directory", ""))
+    except (ValueError, FileNotFoundError) as error:
+        send_response(connection, {"ok": False, "error": str(error)})
+        return
+
+    destination = directory / filename
     destination_exists = destination.exists() or destination.is_symlink()
     if destination.is_dir():
         send_response(connection, {"ok": False, "error": "A directory with that name exists."})
@@ -59,7 +254,7 @@ def receive_upload(connection, reader, request):
     try:
         with tempfile.NamedTemporaryFile(
             mode="wb",
-            dir=STORAGE_DIR,
+            dir=directory,
             prefix=".upload-",
             suffix=".tmp",
             delete=False,
@@ -98,13 +293,19 @@ def receive_upload(connection, reader, request):
             except OSError as error:
                 print(f"Could not remove temporary upload {temporary_path}: {error}")
 
-
-def send_download(connection, filename):
+# send requested file to client
+def send_download(connection, filename, relative_directory=""):
     if not valid_filename(filename):
         send_response(connection, {"ok": False, "error": "Invalid filename."})
         return
 
-    source = STORAGE_DIR / filename
+    try:
+        directory = resolve_current_directory(relative_directory)
+    except (ValueError, FileNotFoundError) as error:
+        send_response(connection, {"ok": False, "error": str(error)})
+        return
+
+    source = directory / filename
     if source.is_symlink() or not source.is_file():
         send_response(connection, {"ok": False, "error": "File not found."})
         return
@@ -183,12 +384,17 @@ def handle_client(connection, address):
                     receive_upload(connection, reader, upload_request)
                 elif upload_request.get("command") == "DOWNLOAD":
                     send_download(connection, upload_request.get("filename"))
+                elif upload_request.get("command") == "SUBFOLDER":
+                    handle_subfolder(connection, upload_request)
                 else:
                     send_response(connection, {"ok": False, "error": "Unsupported command."})
             else:
                 send_response(
                     connection,
-                    {"ok": False, "error": "Unsupported command. Try DIR, UPLOAD, or DOWNLOAD."},
+                    {
+                        "ok": False,
+                        "error": "Unsupported command. Try DIR, UPLOAD, DOWNLOAD, or SUBFOLDER.",
+                    },
                 )
 
 # driver code

@@ -1,5 +1,5 @@
 # created 2026-11-25 by dani/Androtis
-# last modified: 2026-11-25 by dani/Androtis
+# last modified: 2026-11-25 by hosevana
 # Terminal UI Helper Code
 from pathlib import Path
 import os
@@ -14,22 +14,23 @@ def clear_terminal():
 
 # Line sweep UI Decorator
 def line_sweep():
-    line: str = ""
-    for i in range(num_lines):
-        if i % 2 == 0:
-            line += '^'
-        else:
-            line += '-'
-    print(line)
+    print('^-' * (int(num_lines/2)))
 
 # Prompts the user intial question
 def question_line():
     clear_terminal()
     line_sweep()
-    print('\nEnter DIR, UPLOAD <local-file-path>, or q to quit: \n')
-    print("> ")
+    print('\nEnter one:')
+    print('DIR: list files in the current directory')
+    print('SUBFOLDER CREATE|DELETE <directory-path>: create or delete a subfolder')
+    print('UPLOAD <local-file-path>: upload a file to the server')
+    print('DOWNLOAD <filename>: download a file from the server')
+    print('DELETE <filename>: delete a file from the server')
+    print('CD <directory-path>: change the current directory')
+    print('q: quit the program')
 
 # Reponse given by the DIR Command
+# this is unnecessary - hosevana
 def dir_response(dir: Path):
     clear_terminal()
     line_sweep()

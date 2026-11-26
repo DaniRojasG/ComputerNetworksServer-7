@@ -40,8 +40,17 @@ Set the full directory to work properly, not just the directory the command is r
 Enter `DIR` in the client to list server files. Use `UPLOAD <local-file-path>`
 to send a file; only the local file's name is stored on the server. If a file
 with that name already exists, the client asks before overwriting it. Use
-`DOWNLOAD <filename>` to save a server file to the directory where you started
-the client; the client asks before replacing an existing local file.
+`DOWNLOAD <filename>` to save a server file to the client's Downloads folder;
+the client asks before replacing an existing local file. Use `DELETE <filename>`
+to remove a file from the current server directory; the client confirms first.
+
+Use `CD <directory>` to move through server folders, `CD ..` to move up, and
+`CD /` to return to the storage root. `DIR`, `UPLOAD`, `DOWNLOAD`, and `DELETE`
+operate on the current server directory. The current directory is tracked by
+the client and resets to the root when the client restarts. Manage folders
+relative to the current directory with `SUBFOLDER CREATE <path>` and
+`SUBFOLDER DELETE <path>` (for example, `SUBFOLDER CREATE reports/weekly`).
+Folder deletion only removes empty folders; remove their contents first.
 
 The client connects to the server's external IP on TCP port `3300`.
 ## Process Overview
