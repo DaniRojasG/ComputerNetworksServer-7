@@ -448,26 +448,7 @@ def handle_client(connection, address):
                     },
                 )
             elif request.strip().upper() == b"DIR":
-                try:
-                    entries = []
-                    for item in STORAGE_DIR.iterdir():
-                        if item.is_symlink():
-                            continue
-                        entry = {
-                            "name": item.name,
-                            "type": "directory" if item.is_dir() else "file",
-                        }
-                        if item.is_file():
-                            entry["size_bytes"] = item.stat().st_size
-                        entries.append(entry)
-                    entries.sort(key=lambda entry: entry["name"].casefold())
-                    send_response(connection, {"ok": True, "entries": entries})
-                except OSError as error:
-                    print(f"Could not list storage directory {STORAGE_DIR}: {error}")
-                    send_response(
-                        connection,
-                        {"ok": False, "error": "Could not list server storage."},
-                    )
+                list_directory(connection, {})
             elif request.startswith(b"{"):
                 try:
                     upload_request = json.loads(request.decode("utf-8"))
@@ -476,10 +457,20 @@ def handle_client(connection, address):
                     return
                 if not isinstance(upload_request, dict):
                     send_response(connection, {"ok": False, "error": "Invalid JSON request."})
+                elif upload_request.get("command") == "DIR":
+                    list_directory(connection, upload_request)
+                elif upload_request.get("command") == "CD":
+                    change_directory(connection, upload_request)
                 elif upload_request.get("command") == "UPLOAD":
                     receive_upload(connection, reader, upload_request)
                 elif upload_request.get("command") == "DOWNLOAD":
-                    send_download(connection, upload_request.get("filename"))
+                    send_download(
+                        connection,
+                        upload_request.get("filename"),
+                        upload_request.get("directory", ""),
+                    )
+                elif upload_request.get("command") == "DELETE":
+                    delete_file(connection, upload_request)
                 elif upload_request.get("command") == "SUBFOLDER":
                     handle_subfolder(connection, upload_request)
                 else:
@@ -489,7 +480,10 @@ def handle_client(connection, address):
                     connection,
                     {
                         "ok": False,
-                        "error": "Unsupported command. Try DIR, UPLOAD, DOWNLOAD, or SUBFOLDER.",
+                        "error": (
+                            "Unsupported command. Try DIR, CD, UPLOAD, DOWNLOAD, "
+                            "DELETE, or SUBFOLDER."
+                        ),
                     },
                 )
 
