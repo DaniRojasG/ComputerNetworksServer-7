@@ -9,8 +9,10 @@ import socket
 import tempfile
 from pathlib import Path
 
+import ui
+
 # client and server should match port
-host = '34.42.142.230'
+host = '35.239.196.153'
 port = 3300
 CHUNK_SIZE = 64 * 1024
 current_remote_directory = ""
@@ -179,7 +181,7 @@ def subfolder_command(action, folder_path, directory=""):
     else:
         print(f"Server error: {response['error']}")
 
-
+# delete file, send delete command to server
 def delete_file(filename, directory=""):
     if (
         not filename
@@ -212,7 +214,7 @@ def delete_file(filename, directory=""):
     else:
         print(f"Server error: {response['error']}")
 
-
+# send the change directory command
 def change_directory(path):
     global current_remote_directory
     request = {
@@ -236,10 +238,12 @@ def change_directory(path):
 
 # driver code
 if __name__ == '__main__':
+    ui.question_line()
     while True:
         shown_path = f"/{current_remote_directory}" if current_remote_directory else "/"
         command = input(f"Server:{shown_path}> ").strip()
         if command.lower() == 'q':
+            ui.quit_message()
             break
         try:
             operation, separator, argument = command.partition(" ")
@@ -283,10 +287,6 @@ if __name__ == '__main__':
                 else:
                     print("Use SUBFOLDER CREATE <path> or SUBFOLDER DELETE <path>.")
             else:
-                print(
-                    "Commands: DIR, CD <path>, UPLOAD <local-file-path>, "
-                    "DOWNLOAD <filename>, DELETE <filename>, "
-                    "SUBFOLDER CREATE|DELETE <path>, q."
-                )
+                ui.question_line()
         except OSError as error:
             print(f"Request failed: {error}")

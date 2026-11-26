@@ -63,14 +63,14 @@ def resolve_storage_path(relative_path, allow_root=False):
         raise ValueError("Folder path must remain inside server storage.") from error
     return resolved
 
-
+# check if the current directory exists
 def resolve_current_directory(relative_path):
     directory = resolve_storage_path(relative_path, allow_root=True)
     if not directory.is_dir():
         raise FileNotFoundError("Server directory not found.")
     return directory
 
-
+# return the relative path of a directory
 def relative_storage_path(directory):
     relative = directory.relative_to(STORAGE_DIR.resolve())
     return "" if relative == Path(".") else relative.as_posix()
@@ -125,7 +125,7 @@ def handle_subfolder(connection, request):
             message = f"Could not {action.lower()} subfolder. Check server permissions."
         send_response(connection, {"ok": False, "error": message})
 
-
+# list the current directory
 def list_directory(connection, request):
     try:
         directory = resolve_current_directory(request.get("directory", ""))
@@ -155,7 +155,7 @@ def list_directory(connection, request):
         print(f"Could not list server directory: {error}")
         send_response(connection, {"ok": False, "error": "Could not list server directory."})
 
-
+# change the current directory, upwards or downwards
 def change_directory(connection, request):
     try:
         current_directory = resolve_current_directory(request.get("directory", ""))
@@ -194,7 +194,7 @@ def change_directory(connection, request):
     except (ValueError, FileNotFoundError) as error:
         send_response(connection, {"ok": False, "error": str(error)})
 
-
+# delete a file
 def delete_file(connection, request):
     filename = request.get("filename")
     if not valid_filename(filename):
@@ -219,7 +219,6 @@ def delete_file(connection, request):
     except OSError as error:
         print(f"Could not delete file {target}: {error}")
         send_response(connection, {"ok": False, "error": "Could not delete server file."})
-
 
 # receive the upload, write to temp file, move to storage, send response
 def receive_upload(connection, reader, request):
@@ -353,7 +352,26 @@ def handle_client(connection, address):
                     },
                 )
             elif request.strip().upper() == b"DIR":
-                list_directory(connection, {})
+                try:
+                    entries = []
+                    for item in STORAGE_DIR.iterdir():
+                        if item.is_symlink():
+                            continue
+                        entry = {
+                            "name": item.name,
+                            "type": "directory" if item.is_dir() else "file",
+                        }
+                        if item.is_file():
+                            entry["size_bytes"] = item.stat().st_size
+                        entries.append(entry)
+                    entries.sort(key=lambda entry: entry["name"].casefold())
+                    send_response(connection, {"ok": True, "entries": entries})
+                except OSError as error:
+                    print(f"Could not list storage directory {STORAGE_DIR}: {error}")
+                    send_response(
+                        connection,
+                        {"ok": False, "error": "Could not list server storage."},
+                    )
             elif request.startswith(b"{"):
                 try:
                     upload_request = json.loads(request.decode("utf-8"))
@@ -362,20 +380,10 @@ def handle_client(connection, address):
                     return
                 if not isinstance(upload_request, dict):
                     send_response(connection, {"ok": False, "error": "Invalid JSON request."})
-                elif upload_request.get("command") == "DIR":
-                    list_directory(connection, upload_request)
-                elif upload_request.get("command") == "CD":
-                    change_directory(connection, upload_request)
                 elif upload_request.get("command") == "UPLOAD":
                     receive_upload(connection, reader, upload_request)
                 elif upload_request.get("command") == "DOWNLOAD":
-                    send_download(
-                        connection,
-                        upload_request.get("filename"),
-                        upload_request.get("directory", ""),
-                    )
-                elif upload_request.get("command") == "DELETE":
-                    delete_file(connection, upload_request)
+                    send_download(connection, upload_request.get("filename"))
                 elif upload_request.get("command") == "SUBFOLDER":
                     handle_subfolder(connection, upload_request)
                 else:
@@ -385,10 +393,7 @@ def handle_client(connection, address):
                     connection,
                     {
                         "ok": False,
-                        "error": (
-                            "Unsupported command. Try DIR, CD, UPLOAD, DOWNLOAD, "
-                            "DELETE, or SUBFOLDER."
-                        ),
+                        "error": "Unsupported command. Try DIR, UPLOAD, DOWNLOAD, or SUBFOLDER.",
                     },
                 )
 
