@@ -14,13 +14,7 @@ def clear_terminal():
 
 # Line sweep UI Decorator
 def line_sweep():
-    line: str = ""
-    for i in range(num_lines):
-        if i % 2 == 0:
-            line += '^'
-        else:
-            line += '-'
-    print(line)
+    print('^-' * (int(num_lines/2)))
 
 # Prompts the user intial question
 def question_line():
@@ -45,3 +39,6 @@ def quit_message():
     print("Thank you for using our service. Till Next Time.")
     time.sleep(2)
     clear_terminal()
+
+if __name__ == "__main__":
+    dir_response(Path.cwd())
