@@ -5,17 +5,38 @@
 import errno
 import json
 import os
+import re
 import socket
 import tempfile
 import threading
+import unicodedata
 from pathlib import Path
 
 HOST = "0.0.0.0"
 PORT = 3300
 CHUNK_SIZE = 64 * 1024
+TEXT_EXTENSIONS = {
+    ".txt", ".text", ".md", ".csv", ".tsv", ".json", ".xml", ".html", ".htm",
+    ".css", ".js", ".py", ".c", ".h", ".cpp", ".hpp", ".java", ".log",
+    ".yaml", ".yml", ".ini", ".sql", ".rtf",
+}
+AUDIO_EXTENSIONS = {
+    ".mp3", ".wav", ".aac", ".flac", ".ogg", ".m4a", ".wma", ".aiff", ".opus",
+    ".mid", ".midi",
+}
+VIDEO_EXTENSIONS = {
+    ".mp4", ".mov", ".avi", ".mkv", ".webm", ".wmv", ".m4v", ".mpg", ".mpeg",
+    ".3gp", ".flv",
+}
+IMAGE_EXTENSIONS = {
+    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff", ".webp", ".svg",
+    ".ico", ".heic", ".heif", ".avif",
+}
 STORAGE_DIR = Path(
     os.environ.get("FILE_STORAGE_DIR", "/mnt/disks/file-storage")
 ).expanduser().resolve()
+UPLOAD_NAME_LOCK = threading.Lock()
+RESERVED_UPLOAD_NAMES = set()
 
 # send response function
 def send_response(connection, response):
@@ -23,13 +44,83 @@ def send_response(connection, response):
 
 # validate filename
 def valid_filename(filename):
-    return (
-        isinstance(filename, str)
-        and filename not in {"", ".", ".."}
-        and "/" not in filename
-        and "\\" not in filename
-        and "\0" not in filename
-    )
+    if (
+        not isinstance(filename, str)
+        or filename in {"", ".", ".."}
+        or filename.endswith((" ", "."))
+        or any(char in '<>:"/\\|?*' for char in filename)
+        or any(unicodedata.category(char) == "Cc" for char in filename)
+    ):
+        return False
+
+    try:
+        if len(filename.encode("utf-8")) > 255:
+            return False
+    except UnicodeEncodeError:
+        return False
+
+    reserved_names = {
+        "CON",
+        "PRN",
+        "AUX",
+        "NUL",
+        "CONIN$",
+        "CONOUT$",
+        "CLOCK$",
+    }
+    reserved_names.update(f"COM{number}" for number in range(1, 10))
+    reserved_names.update(f"LPT{number}" for number in range(1, 10))
+    reserved_names.update(f"COM{number}" for number in "¹²³")
+    reserved_names.update(f"LPT{number}" for number in "¹²³")
+    stem = filename.split(".", 1)[0].rstrip(" .").upper()
+    return stem not in reserved_names
+
+
+def allocate_upload_filename(original_filename):
+    extension = Path(original_filename).suffix
+    extension_type = extension.lower()
+    if extension_type in TEXT_EXTENSIONS:
+        prefix = "TS"
+    elif extension_type in AUDIO_EXTENSIONS:
+        prefix = "AS"
+    elif extension_type in VIDEO_EXTENSIONS:
+        prefix = "VS"
+    elif extension_type in IMAGE_EXTENSIONS:
+        prefix = "IS"
+    else:
+        prefix = "OS"
+
+    sequence_pattern = re.compile(rf"^{prefix}(\d+)(?:\.|$)", re.IGNORECASE)
+    with UPLOAD_NAME_LOCK:
+        existing_names = set()
+        highest_number = 0
+        for path in STORAGE_DIR.rglob("*"):
+            existing_names.add(path.name.casefold())
+            match = sequence_pattern.match(path.name)
+            if match:
+                highest_number = max(highest_number, int(match.group(1)))
+
+        for name in RESERVED_UPLOAD_NAMES:
+            match = sequence_pattern.match(name)
+            if match:
+                highest_number = max(highest_number, int(match.group(1)))
+
+        number = highest_number + 1
+        while True:
+            generated_name = f"{prefix}{number:03d}{extension}"
+            if not valid_filename(generated_name):
+                raise ValueError("The uploaded file extension cannot be used in a server filename.")
+            name_key = generated_name.casefold()
+            if name_key not in existing_names and name_key not in RESERVED_UPLOAD_NAMES:
+                RESERVED_UPLOAD_NAMES.add(name_key)
+                return generated_name
+            number += 1
+
+
+def release_upload_filename(filename):
+    with UPLOAD_NAME_LOCK:
+        RESERVED_UPLOAD_NAMES.discard(filename.casefold())
+
 
 # ensure filepath is valid and inside storage, return resolved path
 def resolve_storage_path(relative_path, allow_root=False):
@@ -224,15 +315,11 @@ def delete_file(connection, request):
 def receive_upload(connection, reader, request):
     filename = request.get("filename")
     size = request.get("size")
-    overwrite = request.get("overwrite", False)
     if not valid_filename(filename):
         send_response(connection, {"ok": False, "error": "Invalid filename."})
         return
     if type(size) is not int or size < 0:
         send_response(connection, {"ok": False, "error": "Invalid file size."})
-        return
-    if not isinstance(overwrite, bool):
-        send_response(connection, {"ok": False, "error": "Invalid overwrite option."})
         return
 
     try:
@@ -241,15 +328,14 @@ def receive_upload(connection, reader, request):
         send_response(connection, {"ok": False, "error": str(error)})
         return
 
-    destination = directory / filename
-    destination_exists = destination.exists() or destination.is_symlink()
-    if destination.is_dir():
-        send_response(connection, {"ok": False, "error": "A directory with that name exists."})
-        return
-    if destination_exists and not overwrite:
-        send_response(connection, {"ok": False, "exists": True, "error": "File already exists."})
+    try:
+        stored_filename = allocate_upload_filename(filename)
+    except (OSError, ValueError) as error:
+        print(f"Could not assign a server filename to {filename}: {error}")
+        send_response(connection, {"ok": False, "error": "Could not assign a server filename."})
         return
 
+    destination = directory / stored_filename
     temporary_path = None
     try:
         with tempfile.NamedTemporaryFile(
@@ -260,7 +346,10 @@ def receive_upload(connection, reader, request):
             delete=False,
         ) as temporary_file:
             temporary_path = Path(temporary_file.name)
-            send_response(connection, {"ok": True, "ready": True})
+            send_response(
+                connection,
+                {"ok": True, "ready": True, "filename": stored_filename},
+            )
 
             remaining = size
             while remaining:
@@ -270,16 +359,22 @@ def receive_upload(connection, reader, request):
                 temporary_file.write(chunk)
                 remaining -= len(chunk)
 
-        if overwrite:
-            os.replace(temporary_path, destination)
-        else:
-            # Linking fails atomically if another client created the name meanwhile.
-            os.link(temporary_path, destination)
-            temporary_path.unlink()
+        os.link(temporary_path, destination)
+        temporary_path.unlink()
         temporary_path = None
-        send_response(connection, {"ok": True, "message": f"Uploaded {filename} ({size} bytes)."})
+        send_response(
+            connection,
+            {
+                "ok": True,
+                "filename": stored_filename,
+                "message": f"Uploaded as {stored_filename} ({size} bytes).",
+            },
+        )
     except FileExistsError:
-        send_response(connection, {"ok": False, "error": "File already exists."})
+        send_response(
+            connection,
+            {"ok": False, "error": "Generated filename collision; please retry the upload."},
+        )
     except OSError as error:
         print(f"Upload of {filename} failed: {error}")
         try:
@@ -287,6 +382,7 @@ def receive_upload(connection, reader, request):
         except OSError as send_error:
             print(f"Could not send upload error to {filename}: {send_error}")
     finally:
+        release_upload_filename(stored_filename)
         if temporary_path is not None:
             try:
                 temporary_path.unlink(missing_ok=True)

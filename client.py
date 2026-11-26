@@ -1,18 +1,19 @@
 # Client Code
 # initially commited 2026-11-04 by dani/Androtis, created 2026-11-23 by hosevana
-# last modified 2026-11-25 by hosevana
+# last modified 2026-11-26 by hosevana
 # client driver code, ran on pc
-# tested as of 2026-11-25
+# tested as of 2026-11-26
 import json
 import os
 import socket
 import tempfile
+import unicodedata
 from pathlib import Path
 
 import ui
 
 # client and server should match port
-host = '35.239.196.153'
+host = '136.114.4.198'
 port = 3300
 CHUNK_SIZE = 64 * 1024
 current_remote_directory = ""
@@ -39,18 +40,58 @@ def setup_connection(command, directory=""):
                 size = f" ({entry['size_bytes']} bytes)" if "size_bytes" in entry else ""
                 print(f"{entry['name']}{suffix}{size}")
 
+
+def valid_upload_filename(filename):
+    if (
+        not filename
+        or filename in {".", ".."}
+        or filename.endswith((" ", "."))
+        or any(char in '<>:"/\\|?*' for char in filename)
+        or any(unicodedata.category(char) == "Cc" for char in filename)
+    ):
+        return False
+
+    try:
+        if len(filename.encode("utf-8")) > 255:
+            return False
+    except UnicodeEncodeError:
+        return False
+
+    reserved_names = {
+        "CON",
+        "PRN",
+        "AUX",
+        "NUL",
+        "CONIN$",
+        "CONOUT$",
+        "CLOCK$",
+    }
+    reserved_names.update(f"COM{number}" for number in range(1, 10))
+    reserved_names.update(f"LPT{number}" for number in range(1, 10))
+    reserved_names.update(f"COM{number}" for number in "¹²³")
+    reserved_names.update(f"LPT{number}" for number in "¹²³")
+    stem = filename.split(".", 1)[0].rstrip(" .").upper()
+    return stem not in reserved_names
+
+
 # transfer upload function, send file to server, return response
-def transfer_upload(file_path, overwrite=False, directory=""):
+def transfer_upload(file_path, directory=""):
     source = Path(file_path).expanduser()
     if not source.is_file():
         raise FileNotFoundError(f"Not a file: {source}")
 
+    filename = source.name
+    if not valid_upload_filename(filename):
+        raise ValueError(
+            "Unsafe filename. Use a name without Windows-invalid characters, "
+            "reserved device names, trailing spaces/dots, or more than 255 UTF-8 bytes."
+        )
+
     size = source.stat().st_size
     request = {
         "command": "UPLOAD",
-        "filename": source.name,
+        "filename": filename,
         "size": size,
-        "overwrite": overwrite,
         "directory": directory,
     }
 
@@ -73,18 +114,9 @@ def transfer_upload(file_path, overwrite=False, directory=""):
 
             return json.loads(response_file.readline().decode("utf-8"))
 
-# upload file function, confirm overwrite if file already exists, call transfer_upload
+# upload file and display the server-assigned name
 def upload_file(file_path, directory=""):
     response = transfer_upload(file_path, directory=directory)
-    if response.get("exists"):
-        confirmation = input(
-            f"{Path(file_path).name} already exists on the server. Overwrite? [y/N]: "
-        ).strip().lower()
-        if confirmation not in {"y", "yes"}:
-            print("Upload cancelled.")
-            return
-        response = transfer_upload(file_path, overwrite=True, directory=directory)
-
     if response.get("ok"):
         print(response["message"])
     else:
@@ -288,5 +320,5 @@ if __name__ == '__main__':
                     print("Use SUBFOLDER CREATE <path> or SUBFOLDER DELETE <path>.")
             else:
                 ui.question_line()
-        except OSError as error:
+        except (OSError, ValueError) as error:
             print(f"Request failed: {error}")
