@@ -1,8 +1,8 @@
 # Client Code
 # initially commited 2026-11-04 by dani/Androtis, created 2026-11-23 by hosevana
-# last modified 2026-11-24 by hosevana
+# last modified 2026-11-25 by hosevana
 # client driver code, ran on pc
-# untested as of 2026-11-24
+# tested as of 2026-11-25
 import json
 import os
 import socket
@@ -10,30 +10,35 @@ import tempfile
 from pathlib import Path
 
 # client and server should match port
-host = '34.9.15.231'
+host = '34.42.142.230'
 port = 3300
 CHUNK_SIZE = 64 * 1024
+current_remote_directory = ""
 
 # setup connection to server, send command, print response
-def setup_connection(command):
+def setup_connection(command, directory=""):
+    request = {"command": command, "directory": directory}
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client_tcp:
         client_tcp.connect((host, port))
-        client_tcp.sendall((command + "\n").encode("utf-8"))
+        client_tcp.sendall((json.dumps(request) + "\n").encode("utf-8"))
         with client_tcp.makefile("rb") as response_file:
             response = json.loads(response_file.readline().decode("utf-8"))
 
     if not response["ok"]:
         print(f"Server error: {response['error']}")
-    elif not response.get("entries"):
-        print("Server storage is empty.")
     else:
-        for entry in response["entries"]:
-            suffix = "/" if entry["type"] == "directory" else ""
-            size = f" ({entry['size_bytes']} bytes)" if "size_bytes" in entry else ""
-            print(f"{entry['name']}{suffix}{size}")
+        remote_path = response.get("path", "")
+        print(f"Server directory: /{remote_path}" if remote_path else "Server directory: /")
+        if not response["entries"]:
+            print("This server directory is empty.")
+        else:
+            for entry in response["entries"]:
+                suffix = "/" if entry["type"] == "directory" else ""
+                size = f" ({entry['size_bytes']} bytes)" if "size_bytes" in entry else ""
+                print(f"{entry['name']}{suffix}{size}")
 
 # transfer upload function, send file to server, return response
-def transfer_upload(file_path, overwrite=False):
+def transfer_upload(file_path, overwrite=False, directory=""):
     source = Path(file_path).expanduser()
     if not source.is_file():
         raise FileNotFoundError(f"Not a file: {source}")
@@ -44,6 +49,7 @@ def transfer_upload(file_path, overwrite=False):
         "filename": source.name,
         "size": size,
         "overwrite": overwrite,
+        "directory": directory,
     }
 
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client_tcp:
@@ -66,8 +72,8 @@ def transfer_upload(file_path, overwrite=False):
             return json.loads(response_file.readline().decode("utf-8"))
 
 # upload file function, confirm overwrite if file already exists, call transfer_upload
-def upload_file(file_path):
-    response = transfer_upload(file_path)
+def upload_file(file_path, directory=""):
+    response = transfer_upload(file_path, directory=directory)
     if response.get("exists"):
         confirmation = input(
             f"{Path(file_path).name} already exists on the server. Overwrite? [y/N]: "
@@ -75,15 +81,15 @@ def upload_file(file_path):
         if confirmation not in {"y", "yes"}:
             print("Upload cancelled.")
             return
-        response = transfer_upload(file_path, overwrite=True)
+        response = transfer_upload(file_path, overwrite=True, directory=directory)
 
     if response.get("ok"):
         print(response["message"])
     else:
         print(f"Server error: {response['error']}")
 
-
-def download_file(filename):
+# download file, confirm overwrite if file exists, save to Downloads
+def download_file(filename, directory=""):
     if (
         not filename
         or filename in {".", ".."}
@@ -108,7 +114,11 @@ def download_file(filename):
             print("Download cancelled.")
             return
 
-    request = {"command": "DOWNLOAD", "filename": filename}
+    request = {
+        "command": "DOWNLOAD",
+        "filename": filename,
+        "directory": directory,
+    }
     temporary_path = None
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client_tcp:
@@ -150,12 +160,13 @@ def download_file(filename):
             except OSError as error:
                 print(f"Could not remove temporary download {temporary_path}: {error}")
 
-
-def subfolder_command(action, folder_path):
+# subfolder, creates or deletes a subfolder and prints response
+def subfolder_command(action, folder_path, directory=""):
     request = {
         "command": "SUBFOLDER",
         "action": action.upper(),
         "path": folder_path,
+        "directory": directory,
     }
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client_tcp:
         client_tcp.connect((host, port))
@@ -169,24 +180,76 @@ def subfolder_command(action, folder_path):
         print(f"Server error: {response['error']}")
 
 
+def delete_file(filename, directory=""):
+    if (
+        not filename
+        or filename in {".", ".."}
+        or "/" in filename
+        or "\\" in filename
+        or "\0" in filename
+    ):
+        print("Enter a filename from the current server directory.")
+        return
+
+    confirmation = input(f"Delete {filename} from the server? [y/N]: ").strip().lower()
+    if confirmation not in {"y", "yes"}:
+        print("Delete cancelled.")
+        return
+
+    request = {
+        "command": "DELETE",
+        "filename": filename,
+        "directory": directory,
+    }
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client_tcp:
+        client_tcp.connect((host, port))
+        client_tcp.sendall((json.dumps(request) + "\n").encode("utf-8"))
+        with client_tcp.makefile("rb") as response_file:
+            response = json.loads(response_file.readline().decode("utf-8"))
+
+    if response["ok"]:
+        print(response["message"])
+    else:
+        print(f"Server error: {response['error']}")
+
+
+def change_directory(path):
+    global current_remote_directory
+    request = {
+        "command": "CD",
+        "directory": current_remote_directory,
+        "path": path,
+    }
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client_tcp:
+        client_tcp.connect((host, port))
+        client_tcp.sendall((json.dumps(request) + "\n").encode("utf-8"))
+        with client_tcp.makefile("rb") as response_file:
+            response = json.loads(response_file.readline().decode("utf-8"))
+
+    if response["ok"]:
+        current_remote_directory = response["path"]
+        shown_path = f"/{current_remote_directory}" if current_remote_directory else "/"
+        print(f"Changed server directory to {shown_path}")
+    else:
+        print(f"Server error: {response['error']}")
+
+
 # driver code
 if __name__ == '__main__':
     while True:
-        command = input(
-            'Enter DIR, UPLOAD <local-file-path>, DOWNLOAD <filename>, '
-            'SUBFOLDER CREATE|DELETE <path>, or q to quit: '
-        ).strip()
+        shown_path = f"/{current_remote_directory}" if current_remote_directory else "/"
+        command = input(f"Server:{shown_path}> ").strip()
         if command.lower() == 'q':
             break
         try:
             operation, separator, argument = command.partition(" ")
             if operation.upper() == "DIR":
-                setup_connection("DIR")
+                setup_connection("DIR", current_remote_directory)
             elif operation.upper() == "UPLOAD" and separator and argument.strip():
                 file_path = argument.strip()
                 if len(file_path) >= 2 and file_path[0] == file_path[-1] and file_path[0] in {"'", '"'}:
                     file_path = file_path[1:-1]
-                upload_file(file_path)
+                upload_file(file_path, current_remote_directory)
             elif operation.upper() == "DOWNLOAD" and separator and argument.strip():
                 filename = argument.strip()
                 if (
@@ -195,7 +258,17 @@ if __name__ == '__main__':
                     and filename[0] in {"'", '"'}
                 ):
                     filename = filename[1:-1]
-                download_file(filename)
+                download_file(filename, current_remote_directory)
+            elif operation.upper() == "DELETE" and separator and argument.strip():
+                filename = argument.strip()
+                if len(filename) >= 2 and filename[0] == filename[-1] and filename[0] in {"'", '"'}:
+                    filename = filename[1:-1]
+                delete_file(filename, current_remote_directory)
+            elif operation.upper() == "CD" and separator and argument.strip():
+                path = argument.strip()
+                if len(path) >= 2 and path[0] == path[-1] and path[0] in {"'", '"'}:
+                    path = path[1:-1]
+                change_directory(path)
             elif operation.upper() == "SUBFOLDER" and separator and argument.strip():
                 action, action_separator, folder_path = argument.strip().partition(" ")
                 if action_separator and folder_path.strip():
@@ -206,13 +279,14 @@ if __name__ == '__main__':
                         and folder_path[0] in {"'", '"'}
                     ):
                         folder_path = folder_path[1:-1]
-                    subfolder_command(action, folder_path)
+                    subfolder_command(action, folder_path, current_remote_directory)
                 else:
                     print("Use SUBFOLDER CREATE <path> or SUBFOLDER DELETE <path>.")
             else:
                 print(
-                    "Use DIR, UPLOAD <local-file-path>, DOWNLOAD <filename>, "
-                    "or SUBFOLDER CREATE|DELETE <path>."
+                    "Commands: DIR, CD <path>, UPLOAD <local-file-path>, "
+                    "DOWNLOAD <filename>, DELETE <filename>, "
+                    "SUBFOLDER CREATE|DELETE <path>, q."
                 )
         except OSError as error:
             print(f"Request failed: {error}")
