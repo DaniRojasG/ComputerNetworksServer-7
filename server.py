@@ -11,6 +11,7 @@ import tempfile
 import threading
 import unicodedata
 from pathlib import Path
+import metrics
 
 HOST = "0.0.0.0"
 PORT = 3300
@@ -495,6 +496,8 @@ def main():
         server.bind((HOST, PORT))
         server.listen()
         print(f"Listening on {HOST}:{PORT}")
+
+        metrics.start_metrics(PORT)
 
         while True:
             connection, address = server.accept()

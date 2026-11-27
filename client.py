@@ -13,7 +13,7 @@ from pathlib import Path
 import ui
 
 # client and server should match port
-host = '34.31.254.103'
+host = '35.232.168.26'
 port = 3300
 CHUNK_SIZE = 64 * 1024
 current_remote_directory = ""

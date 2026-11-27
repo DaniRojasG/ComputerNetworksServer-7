@@ -58,5 +58,19 @@ relative to the current directory with `SUBFOLDER CREATE <path>` and
 Folder deletion only removes empty folders; remove their contents first.
 
 The client connects to the server's external IP on TCP port `3300`.
+
+## Metrics
+
+All relevant information is captured by the metrics process as soon
+as the server is ran. Once the server finishes running it will store
+all the data metrics picked into a JSON & CSV file. Both can then
+be view and hold info on relevant infromation such as:
+- Timestamp
+- Client IP
+- Command Used
+- Filename
+- Latency
+- etc.
+
 ## Process Overview
 ![Process Overview](images/processoverview.png)
