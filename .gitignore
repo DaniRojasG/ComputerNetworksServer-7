@@ -1,3 +1,6 @@
 .venv
 /ignore/
 /__pycache__/
+.env
+*.key
+*.pem
