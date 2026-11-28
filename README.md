@@ -24,6 +24,65 @@ and support for a myriad of file types.
 - Audio files must be under 0.5 GB
 - Video files must be under 2 GB
 
+## Authentication and TLS
+
+The server uses one configured username and password. It stores only a
+PBKDF2-HMAC-SHA256 password hash and random salt, while TLS encrypts the
+credentials and file traffic in transit. Passwords and TLS private keys are
+not stored in the source code.
+
+On the VM, generate the password salt and hash; enter the password when
+prompted and keep the printed values private:
+
+```bash
+python3 server.py --create-password-hash
+```
+
+Create a self-signed certificate for the VM's static external IP if you do not
+have a domain. Replace `YOUR_STATIC_IP` with the IP clients will use:
+
+```bash
+mkdir -p ~/fileserver-tls
+openssl req -x509 -newkey rsa:3072 -sha256 -days 365 -nodes \
+  -keyout ~/fileserver-tls/server.key \
+  -out ~/fileserver-tls/server.crt \
+  -subj "/CN=YOUR_STATIC_IP" \
+  -addext "subjectAltName=IP:YOUR_STATIC_IP"
+chmod 600 ~/fileserver-tls/server.key
+```
+
+Keep the private key (`server.key`) on the VM and outside the repository. Put
+the following values in a protected server environment file, for example
+`/etc/fileserver/server.env`:
+
+```ini
+FILESERVER_USERNAME=your-user
+FILESERVER_PASSWORD_SALT=salt-hex-from-command
+FILESERVER_PASSWORD_HASH=hash-hex-from-command
+FILESERVER_TLS_CERT=/home/YOUR_VM_USER/fileserver-tls/server.crt
+FILESERVER_TLS_KEY=/home/YOUR_VM_USER/fileserver-tls/server.key
+```
+
+Protect that file (`sudo chown root:root /etc/fileserver/server.env` and
+`sudo chmod 600 /etc/fileserver/server.env`) and configure your server service
+to load it. The service account must be able to read the certificate and
+private key. Do not commit the environment file or private key.
+
+On the client, trust the public certificate and set the matching server
+address/name before starting `client.py` (PowerShell example):
+
+```powershell
+$env:FILESERVER_HOST = "YOUR_STATIC_IP"
+$env:FILESERVER_TLS_NAME = "YOUR_STATIC_IP"
+$env:FILESERVER_CA_CERT = "$HOME\Downloads\server.crt"
+python client.py
+```
+
+Copy only `server.crt` to the client; never copy `server.key`. The certificate
+name must match `FILESERVER_TLS_NAME`. The client prompts for the username and
+password at startup. For a certificate from a public CA, omit
+`FILESERVER_CA_CERT`.
+
 ## To run
 
 ```bash
@@ -76,6 +135,9 @@ Enter `q` in the client to download `metrics_report.json` and
 `metrics_report.csv` from the server to the client's `Downloads` folder.
 The client asks before overwriting either report. The server keeps its
 original copies. Keep the server running while the client requests them.
+Scapy continues to collect packet-level metrics; because TLS encrypts command
+headers, the server supplies the decrypted command and filename labels to the
+metrics collector.
 
 ## Process Overview
 ![Process Overview](images/processoverview.png)

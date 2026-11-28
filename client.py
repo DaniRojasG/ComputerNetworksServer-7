@@ -4,28 +4,74 @@
 # client driver code, ran on pc
 # tested as of 2026-11-26
 import json
+import getpass
 import os
 import socket
+import ssl
 import tempfile
 import unicodedata
+from contextlib import contextmanager
 from pathlib import Path
 
 import ui
 
 # client and server should match port
-host = '34.172.235.4' # server has static ip now
-port = 3300
+host = os.environ.get("FILESERVER_HOST", "34.172.235.4")
+port = int(os.environ.get("FILESERVER_PORT", "3300"))
 CHUNK_SIZE = 64 * 1024
 current_remote_directory = ""
+username = None
+password = None
+tls_server_name = os.environ.get("FILESERVER_TLS_NAME", host)
+ca_certificate = os.environ.get("FILESERVER_CA_CERT") or None
+tls_context = ssl.create_default_context(cafile=ca_certificate)
+tls_context.minimum_version = ssl.TLSVersion.TLSv1_2
+
+
+@contextmanager
+def authenticated_connection():
+    if not username or password is None:
+        raise PermissionError("Log in before sending server commands.")
+
+    with socket.create_connection((host, port)) as raw_socket:
+        with tls_context.wrap_socket(
+            raw_socket,
+            server_hostname=tls_server_name,
+        ) as client_tcp:
+            with client_tcp.makefile("rb") as response_file:
+                auth_request = {
+                    "command": "AUTH",
+                    "username": username,
+                    "password": password,
+                }
+                client_tcp.sendall((json.dumps(auth_request) + "\n").encode("utf-8"))
+                auth_response = json.loads(response_file.readline().decode("utf-8"))
+                if not isinstance(auth_response, dict) or not auth_response.get("ok"):
+                    error = (
+                        auth_response.get("error", "Authentication failed.")
+                        if isinstance(auth_response, dict)
+                        else "Invalid authentication response."
+                    )
+                    raise PermissionError(error)
+                yield client_tcp, response_file
+
+
+def prompt_for_login():
+    global username, password
+    username = input("Username: ").strip()
+    password = getpass.getpass("Password: ")
+    if not username or not password:
+        raise ValueError("Username and password must not be empty.")
+    with authenticated_connection():
+        pass
+    print("Login successful.")
 
 # setup connection to server, send command, print response
 def setup_connection(command, directory=""):
     request = {"command": command, "directory": directory}
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client_tcp:
-        client_tcp.connect((host, port))
+    with authenticated_connection() as (client_tcp, response_file):
         client_tcp.sendall((json.dumps(request) + "\n").encode("utf-8"))
-        with client_tcp.makefile("rb") as response_file:
-            response = json.loads(response_file.readline().decode("utf-8"))
+        response = json.loads(response_file.readline().decode("utf-8"))
 
     if not response["ok"]:
         print(f"Server error: {response['error']}")
@@ -95,24 +141,22 @@ def transfer_upload(file_path, directory=""):
         "directory": directory,
     }
 
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client_tcp:
-        client_tcp.connect((host, port))
-        with client_tcp.makefile("rb") as response_file:
-            client_tcp.sendall((json.dumps(request) + "\n").encode("utf-8"))
-            response = json.loads(response_file.readline().decode("utf-8"))
-            if not response.get("ok"):
-                return response
+    with authenticated_connection() as (client_tcp, response_file):
+        client_tcp.sendall((json.dumps(request) + "\n").encode("utf-8"))
+        response = json.loads(response_file.readline().decode("utf-8"))
+        if not response.get("ok"):
+            return response
 
-            remaining = size
-            with source.open("rb") as source_file:
-                while remaining:
-                    chunk = source_file.read(min(CHUNK_SIZE, remaining))
-                    if not chunk:
-                        raise OSError(f"{source} changed while it was being uploaded.")
-                    client_tcp.sendall(chunk)
-                    remaining -= len(chunk)
+        remaining = size
+        with source.open("rb") as source_file:
+            while remaining:
+                chunk = source_file.read(min(CHUNK_SIZE, remaining))
+                if not chunk:
+                    raise OSError(f"{source} changed while it was being uploaded.")
+                client_tcp.sendall(chunk)
+                remaining -= len(chunk)
 
-            return json.loads(response_file.readline().decode("utf-8"))
+        return json.loads(response_file.readline().decode("utf-8"))
 
 # upload file and display the server-assigned name
 def upload_file(file_path, directory=""):
@@ -155,34 +199,32 @@ def download_file(filename, directory=""):
     }
     temporary_path = None
     try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client_tcp:
-            client_tcp.connect((host, port))
-            with client_tcp.makefile("rb") as response_file:
-                client_tcp.sendall((json.dumps(request) + "\n").encode("utf-8"))
-                response = json.loads(response_file.readline().decode("utf-8"))
-                if not response.get("ok"):
-                    print(f"Server error: {response['error']}")
-                    return
+        with authenticated_connection() as (client_tcp, response_file):
+            client_tcp.sendall((json.dumps(request) + "\n").encode("utf-8"))
+            response = json.loads(response_file.readline().decode("utf-8"))
+            if not response.get("ok"):
+                print(f"Server error: {response['error']}")
+                return
 
-                size = response.get("size")
-                if type(size) is not int or size < 0:
-                    raise OSError("Server returned an invalid file size.")
+            size = response.get("size")
+            if type(size) is not int or size < 0:
+                raise OSError("Server returned an invalid file size.")
 
-                with tempfile.NamedTemporaryFile(
-                    mode="wb",
-                    dir=destination.parent,
-                    prefix=f".{filename}.",
-                    suffix=".part",
-                    delete=False,
-                ) as temporary_file:
-                    temporary_path = Path(temporary_file.name)
-                    remaining = size
-                    while remaining:
-                        chunk = response_file.read(min(CHUNK_SIZE, remaining))
-                        if not chunk:
-                            raise OSError("Connection ended before the download completed.")
-                        temporary_file.write(chunk)
-                        remaining -= len(chunk)
+            with tempfile.NamedTemporaryFile(
+                mode="wb",
+                dir=destination.parent,
+                prefix=f".{filename}.",
+                suffix=".part",
+                delete=False,
+            ) as temporary_file:
+                temporary_path = Path(temporary_file.name)
+                remaining = size
+                while remaining:
+                    chunk = response_file.read(min(CHUNK_SIZE, remaining))
+                    if not chunk:
+                        raise OSError("Connection ended before the download completed.")
+                    temporary_file.write(chunk)
+                    remaining -= len(chunk)
 
         os.replace(temporary_path, destination)
         temporary_path = None
@@ -216,53 +258,51 @@ def download_metrics_reports():
 
     temporary_files = []
     try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client_tcp:
-            client_tcp.connect((host, port))
-            with client_tcp.makefile("rb") as response_file:
-                request = {"command": "METRICS"}
-                client_tcp.sendall((json.dumps(request) + "\n").encode("utf-8"))
-                response = json.loads(response_file.readline().decode("utf-8"))
-                if not isinstance(response, dict) or not response.get("ok"):
-                    error = (
-                        response.get("error", "Could not retrieve metrics reports.")
-                        if isinstance(response, dict)
-                        else "Invalid response while retrieving metrics reports."
-                    )
-                    print(f"Server error: {error}")
-                    return
+        with authenticated_connection() as (client_tcp, response_file):
+            request = {"command": "METRICS"}
+            client_tcp.sendall((json.dumps(request) + "\n").encode("utf-8"))
+            response = json.loads(response_file.readline().decode("utf-8"))
+            if not isinstance(response, dict) or not response.get("ok"):
+                error = (
+                    response.get("error", "Could not retrieve metrics reports.")
+                    if isinstance(response, dict)
+                    else "Invalid response while retrieving metrics reports."
+                )
+                print(f"Server error: {error}")
+                return
 
-                reports = response.get("files")
-                if (
-                    not isinstance(reports, list)
-                    or len(reports) != len(filenames)
-                    or any(not isinstance(report, dict) for report in reports)
-                    or tuple(report.get("filename") for report in reports) != filenames
-                ):
-                    raise ValueError("Server returned an invalid metrics report list.")
+            reports = response.get("files")
+            if (
+                not isinstance(reports, list)
+                or len(reports) != len(filenames)
+                or any(not isinstance(report, dict) for report in reports)
+                or tuple(report.get("filename") for report in reports) != filenames
+            ):
+                raise ValueError("Server returned an invalid metrics report list.")
 
-                for report, destination in zip(reports, destinations):
-                    size = report.get("size")
-                    if type(size) is not int or size < 0:
-                        raise ValueError("Server returned an invalid metrics report size.")
+            for report, destination in zip(reports, destinations):
+                size = report.get("size")
+                if type(size) is not int or size < 0:
+                    raise ValueError("Server returned an invalid metrics report size.")
 
-                    with tempfile.NamedTemporaryFile(
-                        mode="wb",
-                        dir=download_dir,
-                        prefix=f".{destination.name}.",
-                        suffix=".part",
-                        delete=False,
-                    ) as temporary_file:
-                        temporary_path = Path(temporary_file.name)
-                        temporary_files.append((temporary_path, destination))
-                        remaining = size
-                        while remaining:
-                            chunk = response_file.read(min(CHUNK_SIZE, remaining))
-                            if not chunk:
-                                raise OSError(
-                                    f"Connection ended before {destination.name} finished downloading."
-                                )
-                            temporary_file.write(chunk)
-                            remaining -= len(chunk)
+                with tempfile.NamedTemporaryFile(
+                    mode="wb",
+                    dir=download_dir,
+                    prefix=f".{destination.name}.",
+                    suffix=".part",
+                    delete=False,
+                ) as temporary_file:
+                    temporary_path = Path(temporary_file.name)
+                    temporary_files.append((temporary_path, destination))
+                    remaining = size
+                    while remaining:
+                        chunk = response_file.read(min(CHUNK_SIZE, remaining))
+                        if not chunk:
+                            raise OSError(
+                                f"Connection ended before {destination.name} finished downloading."
+                            )
+                        temporary_file.write(chunk)
+                        remaining -= len(chunk)
 
         for temporary_path, destination in temporary_files:
             os.replace(temporary_path, destination)
@@ -284,11 +324,9 @@ def subfolder_command(action, folder_path, directory=""):
         "path": folder_path,
         "directory": directory,
     }
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client_tcp:
-        client_tcp.connect((host, port))
+    with authenticated_connection() as (client_tcp, response_file):
         client_tcp.sendall((json.dumps(request) + "\n").encode("utf-8"))
-        with client_tcp.makefile("rb") as response_file:
-            response = json.loads(response_file.readline().decode("utf-8"))
+        response = json.loads(response_file.readline().decode("utf-8"))
 
     if response["ok"]:
         print(response["message"])
@@ -317,11 +355,9 @@ def delete_file(filename, directory=""):
         "filename": filename,
         "directory": directory,
     }
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client_tcp:
-        client_tcp.connect((host, port))
+    with authenticated_connection() as (client_tcp, response_file):
         client_tcp.sendall((json.dumps(request) + "\n").encode("utf-8"))
-        with client_tcp.makefile("rb") as response_file:
-            response = json.loads(response_file.readline().decode("utf-8"))
+        response = json.loads(response_file.readline().decode("utf-8"))
 
     if response["ok"]:
         print(response["message"])
@@ -336,11 +372,9 @@ def change_directory(path):
         "directory": current_remote_directory,
         "path": path,
     }
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client_tcp:
-        client_tcp.connect((host, port))
+    with authenticated_connection() as (client_tcp, response_file):
         client_tcp.sendall((json.dumps(request) + "\n").encode("utf-8"))
-        with client_tcp.makefile("rb") as response_file:
-            response = json.loads(response_file.readline().decode("utf-8"))
+        response = json.loads(response_file.readline().decode("utf-8"))
 
     if response["ok"]:
         current_remote_directory = response["path"]
@@ -352,6 +386,12 @@ def change_directory(path):
 
 # driver code
 if __name__ == '__main__':
+    try:
+        prompt_for_login()
+    except (OSError, ValueError, RuntimeError) as error:
+        print(f"Login failed: {error}")
+        raise SystemExit(1) from error
+
     ui.question_line()
     while True:
         shown_path = f"/{current_remote_directory}" if current_remote_directory else "/"
