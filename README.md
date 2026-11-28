@@ -141,3 +141,5 @@ metrics collector.
 
 ## Process Overview
 ![Process Overview](images/processoverview.png)
+
+![System Design](images/SystemDesignNetworks.png)
