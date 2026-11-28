@@ -1,6 +1,6 @@
 # Client Code
 # initially commited 2026-11-04 by dani/Androtis, created 2026-11-23 by hosevana
-# last modified 2026-11-26 by hosevana
+# last modified 2026-11-27 by nia
 # client driver code, ran on pc
 # tested as of 2026-11-26
 import json
@@ -13,7 +13,7 @@ from pathlib import Path
 import ui
 
 # client and server should match port
-host = '35.232.168.26'
+host = '34.172.235.4' # server has static ip now
 port = 3300
 CHUNK_SIZE = 64 * 1024
 current_remote_directory = ""

@@ -1,5 +1,5 @@
 # created 2026-11-04 by dani/Androtis, remade 2026-11-23 by hosevana
-# last modified: 2026-11-25 by hosevana
+# last modified: 2026-11-27 by nia
 # server driver code, ran on gcp compute engine
 # working of 2026-11-25
 import errno
@@ -17,21 +17,16 @@ HOST = "0.0.0.0"
 PORT = 3300
 CHUNK_SIZE = 64 * 1024
 TEXT_EXTENSIONS = {
-    ".txt", ".text", ".md", ".csv", ".tsv", ".json", ".xml", ".html", ".htm",
-    ".css", ".js", ".py", ".c", ".h", ".cpp", ".hpp", ".java", ".log",
-    ".yaml", ".yml", ".ini", ".sql", ".rtf",
+    ".txt", ".text", ".csv", ".json", ".xml", ".html",
 }
 AUDIO_EXTENSIONS = {
-    ".mp3", ".wav", ".aac", ".flac", ".ogg", ".m4a", ".wma", ".aiff", ".opus",
-    ".mid", ".midi",
+    ".mp3", ".wav", ".flac", ".ogg", ".mp4",
 }
 VIDEO_EXTENSIONS = {
-    ".mp4", ".mov", ".avi", ".mkv", ".webm", ".wmv", ".m4v", ".mpg", ".mpeg",
-    ".3gp", ".flv",
+    ".mp4", ".mov", ".webm", ".mpg", ".mpeg",
 }
 IMAGE_EXTENSIONS = {
-    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff", ".webp", ".svg",
-    ".ico", ".heic", ".heif", ".avif",
+    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp",
 }
 STORAGE_DIR = Path(
     os.environ.get("FILE_STORAGE_DIR", "/mnt/disks/file-storage")

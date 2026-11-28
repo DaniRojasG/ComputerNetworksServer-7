@@ -1,5 +1,5 @@
 # created 2026-11-04 by dani/Androtis
-# last modified: 2026-11-26 by dani/Androtis
+# last modified: 2026-11-27 by nia
 # metrics code
 
 import csv
@@ -14,6 +14,21 @@ import scapy.all as sp
 SERVER_PORT = 3300
 JSON_REPORT_PATH = "metrics_report.json"
 CSV_REPORT_PATH = "metrics_report.csv"
+
+TRANSFER_FIELDS = [
+    "timestamp_utc",
+    "client_ip",
+    "client_port",
+    "command",
+    "filename",
+    "bytes_uploaded",
+    "bytes_downloaded",
+    "transfer_time_sec",
+    "data_rate_MBps",
+    "data_rate_Mbps",
+    "response_latency_ms",
+    "packet_count",
+]
 
 
 metrics_lock = threading.Lock()
@@ -55,7 +70,7 @@ def save_report():
     if completed_transfers:
         tmp_csv = CSV_REPORT_PATH + ".tmp"
         with open(tmp_csv, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=list(completed_transfers[0].keys()))
+            writer = csv.DictWriter(f, fieldnames=list(TRANSFER_FIELDS))
             writer.writeheader()
             writer.writerows(completed_transfers)
         os.replace(tmp_csv, CSV_REPORT_PATH)
