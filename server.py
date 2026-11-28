@@ -20,10 +20,10 @@ TEXT_EXTENSIONS = {
     ".txt", ".text", ".csv", ".json", ".xml", ".html",
 }
 AUDIO_EXTENSIONS = {
-    ".mp3", ".wav", ".flac", ".ogg", ".mp4",
+    ".mp3", ".wav", ".flac", ".ogg",
 }
 VIDEO_EXTENSIONS = {
-    ".mp4", ".mov", ".webm", ".mpg", ".mpeg",
+    ".mp4", ".mov", ".webm", ".mpg", ".mpeg", ".mp4",
 }
 IMAGE_EXTENSIONS = {
     ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp",
