@@ -67,13 +67,12 @@ def save_report():
         json.dump(payload, f, indent=2)
     os.replace(tmp_json, JSON_REPORT_PATH)
 
-    if completed_transfers:
-        tmp_csv = CSV_REPORT_PATH + ".tmp"
-        with open(tmp_csv, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=list(TRANSFER_FIELDS))
-            writer.writeheader()
-            writer.writerows(completed_transfers)
-        os.replace(tmp_csv, CSV_REPORT_PATH)
+    tmp_csv = CSV_REPORT_PATH + ".tmp"
+    with open(tmp_csv, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=list(TRANSFER_FIELDS))
+        writer.writeheader()
+        writer.writerows(completed_transfers)
+    os.replace(tmp_csv, CSV_REPORT_PATH)
 
 # Checks top active flow and finalizes it for the report
 def finalize_flow(session_key, end_time):

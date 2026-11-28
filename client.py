@@ -194,6 +194,88 @@ def download_file(filename, directory=""):
             except OSError as error:
                 print(f"Could not remove temporary download {temporary_path}: {error}")
 
+
+def download_metrics_reports():
+    filenames = ("metrics_report.json", "metrics_report.csv")
+    download_dir = Path.home() / "Downloads"
+    download_dir.mkdir(parents=True, exist_ok=True)
+    destinations = [download_dir / filename for filename in filenames]
+    if any(path.is_dir() for path in destinations):
+        print("A directory conflicts with a metrics report filename in Downloads.")
+        return
+
+    existing = [path for path in destinations if path.exists()]
+    if existing:
+        names = ", ".join(path.name for path in existing)
+        confirmation = input(
+            f"{names} already exist in {download_dir}. Overwrite? [y/N]: "
+        ).strip().lower()
+        if confirmation not in {"y", "yes"}:
+            print("Metrics report download cancelled.")
+            return
+
+    temporary_files = []
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client_tcp:
+            client_tcp.connect((host, port))
+            with client_tcp.makefile("rb") as response_file:
+                request = {"command": "METRICS"}
+                client_tcp.sendall((json.dumps(request) + "\n").encode("utf-8"))
+                response = json.loads(response_file.readline().decode("utf-8"))
+                if not isinstance(response, dict) or not response.get("ok"):
+                    error = (
+                        response.get("error", "Could not retrieve metrics reports.")
+                        if isinstance(response, dict)
+                        else "Invalid response while retrieving metrics reports."
+                    )
+                    print(f"Server error: {error}")
+                    return
+
+                reports = response.get("files")
+                if (
+                    not isinstance(reports, list)
+                    or len(reports) != len(filenames)
+                    or any(not isinstance(report, dict) for report in reports)
+                    or tuple(report.get("filename") for report in reports) != filenames
+                ):
+                    raise ValueError("Server returned an invalid metrics report list.")
+
+                for report, destination in zip(reports, destinations):
+                    size = report.get("size")
+                    if type(size) is not int or size < 0:
+                        raise ValueError("Server returned an invalid metrics report size.")
+
+                    with tempfile.NamedTemporaryFile(
+                        mode="wb",
+                        dir=download_dir,
+                        prefix=f".{destination.name}.",
+                        suffix=".part",
+                        delete=False,
+                    ) as temporary_file:
+                        temporary_path = Path(temporary_file.name)
+                        temporary_files.append((temporary_path, destination))
+                        remaining = size
+                        while remaining:
+                            chunk = response_file.read(min(CHUNK_SIZE, remaining))
+                            if not chunk:
+                                raise OSError(
+                                    f"Connection ended before {destination.name} finished downloading."
+                                )
+                            temporary_file.write(chunk)
+                            remaining -= len(chunk)
+
+        for temporary_path, destination in temporary_files:
+            os.replace(temporary_path, destination)
+        for _, destination in temporary_files:
+            print(f"Downloaded {destination.name} to {destination}")
+    finally:
+        for temporary_path, _ in temporary_files:
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError as error:
+                print(f"Could not remove temporary download {temporary_path}: {error}")
+
+
 # subfolder, creates or deletes a subfolder and prints response
 def subfolder_command(action, folder_path, directory=""):
     request = {
@@ -275,6 +357,10 @@ if __name__ == '__main__':
         shown_path = f"/{current_remote_directory}" if current_remote_directory else "/"
         command = input(f"Server:{shown_path}> ").strip()
         if command.lower() == 'q':
+            try:
+                download_metrics_reports()
+            except (OSError, ValueError) as error:
+                print(f"Could not download metrics reports: {error}")
             ui.quit_message()
             break
         try:

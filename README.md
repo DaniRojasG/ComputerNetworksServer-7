@@ -72,5 +72,10 @@ be view and hold info on relevant infromation such as:
 - Latency
 - etc.
 
+Enter `q` in the client to download `metrics_report.json` and
+`metrics_report.csv` from the server to the client's `Downloads` folder.
+The client asks before overwriting either report. The server keeps its
+original copies. Keep the server running while the client requests them.
+
 ## Process Overview
 ![Process Overview](images/processoverview.png)

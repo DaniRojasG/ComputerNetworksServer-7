@@ -429,6 +429,55 @@ def send_download(connection, filename, relative_directory=""):
             remaining -= len(chunk)
 
 
+def send_metrics_reports(connection):
+    try:
+        with metrics.metrics_lock:
+            metrics.save_report()
+    except OSError as error:
+        print(f"Could not save metrics reports: {error}")
+        send_response(connection, {"ok": False, "error": "Could not save metrics reports."})
+        return
+
+    report_paths = (
+        Path(metrics.JSON_REPORT_PATH),
+        Path(metrics.CSV_REPORT_PATH),
+    )
+    opened_reports = []
+    try:
+        reports = []
+        for path in report_paths:
+            report_file = path.open("rb")
+            opened_reports.append(report_file)
+            reports.append(
+                {
+                    "filename": path.name,
+                    "size": os.fstat(report_file.fileno()).st_size,
+                }
+            )
+    except OSError as error:
+        for report_file in opened_reports:
+            report_file.close()
+        print(f"Could not open metrics reports: {error}")
+        send_response(connection, {"ok": False, "error": "Metrics reports are unavailable."})
+        return
+
+    try:
+        send_response(connection, {"ok": True, "files": reports})
+        for report_file, report in zip(opened_reports, reports):
+            remaining = report["size"]
+            while remaining:
+                chunk = report_file.read(min(CHUNK_SIZE, remaining))
+                if not chunk:
+                    raise OSError(f"{report['filename']} changed while being sent.")
+                connection.sendall(chunk)
+                remaining -= len(chunk)
+    except OSError as error:
+        print(f"Sending metrics reports to the client failed: {error}")
+    finally:
+        for report_file in opened_reports:
+            report_file.close()
+
+
 # connect and handle client requests, new thread per client
 def handle_client(connection, address):
     print(f"Connected by {address}")
@@ -469,6 +518,8 @@ def handle_client(connection, address):
                     delete_file(connection, upload_request)
                 elif upload_request.get("command") == "SUBFOLDER":
                     handle_subfolder(connection, upload_request)
+                elif upload_request.get("command") == "METRICS":
+                    send_metrics_reports(connection)
                 else:
                     send_response(connection, {"ok": False, "error": "Unsupported command."})
             else:
