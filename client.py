@@ -23,7 +23,7 @@ current_remote_directory = ""
 username = None
 password = None
 tls_server_name = os.environ.get("FILESERVER_TLS_NAME", host)
-ca_certificate = os.environ.get("FILESERVER_CA_CERT") or None
+ca_certificate = os.environ.get("FILESERVER_CA_CERT", "C:\\Users\\kalce\\Downloads\\server.crt")
 tls_context = ssl.create_default_context(cafile=ca_certificate)
 tls_context.minimum_version = ssl.TLSVersion.TLSv1_2
 
