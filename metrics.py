@@ -37,6 +37,7 @@ stop_event = threading.Event()
 # Active Packet flows and Completed transfers of these flows
 active_flows = {}
 completed_transfers = []
+pending_request_metadata = {}
 
 # Outline of Data to Be Stored
 metrics_data = {
@@ -67,13 +68,12 @@ def save_report():
         json.dump(payload, f, indent=2)
     os.replace(tmp_json, JSON_REPORT_PATH)
 
-    if completed_transfers:
-        tmp_csv = CSV_REPORT_PATH + ".tmp"
-        with open(tmp_csv, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=list(TRANSFER_FIELDS))
-            writer.writeheader()
-            writer.writerows(completed_transfers)
-        os.replace(tmp_csv, CSV_REPORT_PATH)
+    tmp_csv = CSV_REPORT_PATH + ".tmp"
+    with open(tmp_csv, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=list(TRANSFER_FIELDS))
+        writer.writeheader()
+        writer.writerows(completed_transfers)
+    os.replace(tmp_csv, CSV_REPORT_PATH)
 
 # Checks top active flow and finalizes it for the report
 def finalize_flow(session_key, end_time):
@@ -113,6 +113,44 @@ def finalize_flow(session_key, end_time):
     save_report()
 
 
+def apply_request_metadata(flow, command, filename):
+    if flow["command"] != "UNKNOWN":
+        return False
+    flow["command"] = command
+    flow["filename"] = filename
+    key = command if command in metrics_data["commands"] else "OTHER"
+    metrics_data["commands"][key] += 1
+    return True
+
+
+def record_request_metadata(session_key, command, filename=""):
+    if not isinstance(command, str) or not command:
+        return
+    command = command.upper()
+    filename = filename if isinstance(filename, str) else ""
+
+    with metrics_lock:
+        flow = active_flows.get(session_key)
+        if flow is not None:
+            apply_request_metadata(flow, command, filename)
+            return
+
+        for transfer in reversed(completed_transfers):
+            if (
+                transfer["client_ip"] == session_key[0]
+                and transfer["client_port"] == session_key[1]
+                and transfer["command"] == "UNKNOWN"
+            ):
+                transfer["command"] = command
+                transfer["filename"] = filename
+                key = command if command in metrics_data["commands"] else "OTHER"
+                metrics_data["commands"][key] += 1
+                save_report()
+                return
+
+        pending_request_metadata[session_key] = (command, filename)
+
+
 # Process's a Packet
 def process_packet(pkt):
     # Checks if its IP and TCP
@@ -140,6 +178,9 @@ def process_packet(pkt):
                     "bytes_out": 0,
                     "packets": 0,
                 }
+                pending_metadata = pending_request_metadata.pop(session, None)
+                if pending_metadata is not None:
+                    apply_request_metadata(active_flows[session], *pending_metadata)
                 metrics_data["total_connections"] += 1
                 metrics_data["active_connections"] = len(active_flows)
 

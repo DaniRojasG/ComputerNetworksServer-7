@@ -3,10 +3,16 @@
 # server driver code, ran on gcp compute engine
 # working of 2026-11-25
 import errno
+import getpass
+import hashlib
+import hmac
 import json
 import os
 import re
+import secrets
 import socket
+import ssl
+import sys
 import tempfile
 import threading
 import unicodedata
@@ -16,14 +22,15 @@ import metrics
 HOST = "0.0.0.0"
 PORT = 3300
 CHUNK_SIZE = 64 * 1024
+PASSWORD_HASH_ITERATIONS = 600_000
 TEXT_EXTENSIONS = {
     ".txt", ".text", ".csv", ".json", ".xml", ".html",
 }
 AUDIO_EXTENSIONS = {
-    ".mp3", ".wav", ".flac", ".ogg", ".mp4",
+    ".mp3", ".wav", ".flac", ".ogg",
 }
 VIDEO_EXTENSIONS = {
-    ".mp4", ".mov", ".webm", ".mpg", ".mpeg",
+    ".mp4", ".mov", ".webm", ".mpg", ".mpeg", ".mp4",
 }
 IMAGE_EXTENSIONS = {
     ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp",
@@ -37,6 +44,76 @@ RESERVED_UPLOAD_NAMES = set()
 # send response function
 def send_response(connection, response):
     connection.sendall((json.dumps(response) + "\n").encode("utf-8"))
+
+
+def hash_password(password, salt):
+    return hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        salt,
+        PASSWORD_HASH_ITERATIONS,
+    )
+
+
+def create_password_hash():
+    password = getpass.getpass("Create server password: ")
+    confirmation = getpass.getpass("Confirm server password: ")
+    if not password or password != confirmation:
+        raise ValueError("Passwords must be non-empty and match.")
+
+    salt = secrets.token_bytes(16)
+    password_hash = hash_password(password, salt)
+    print(f"FILESERVER_PASSWORD_SALT={salt.hex()}")
+    print(f"FILESERVER_PASSWORD_HASH={password_hash.hex()}")
+
+
+def load_auth_credentials():
+    username = os.environ.get("FILESERVER_USERNAME")
+    salt_hex = os.environ.get("FILESERVER_PASSWORD_SALT")
+    password_hash_hex = os.environ.get("FILESERVER_PASSWORD_HASH")
+    if not username or not salt_hex or not password_hash_hex:
+        raise RuntimeError(
+            "Set FILESERVER_USERNAME, FILESERVER_PASSWORD_SALT, and "
+            "FILESERVER_PASSWORD_HASH before starting the server."
+        )
+
+    try:
+        salt = bytes.fromhex(salt_hex)
+        expected_hash = bytes.fromhex(password_hash_hex)
+    except ValueError as error:
+        raise RuntimeError("Password salt and hash must be hexadecimal.") from error
+    if len(salt) < 16 or len(expected_hash) != 32:
+        raise RuntimeError("Password salt/hash has an invalid length.")
+    return username, salt, expected_hash
+
+
+def verify_credentials(username, password, credentials):
+    if not isinstance(username, str) or not isinstance(password, str):
+        return False
+    expected_username, salt, expected_hash = credentials
+    try:
+        candidate_hash = hash_password(password, salt)
+        username_bytes = username.encode("utf-8")
+        expected_username_bytes = expected_username.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return hmac.compare_digest(
+        username_bytes,
+        expected_username_bytes,
+    ) and hmac.compare_digest(candidate_hash, expected_hash)
+
+
+def create_tls_context():
+    certificate = os.environ.get("FILESERVER_TLS_CERT")
+    private_key = os.environ.get("FILESERVER_TLS_KEY")
+    if not certificate or not private_key:
+        raise RuntimeError("Set FILESERVER_TLS_CERT and FILESERVER_TLS_KEY.")
+
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    context.load_cert_chain(certificate, private_key)
+    return context
+
 
 # validate filename
 def valid_filename(filename):
@@ -429,64 +506,164 @@ def send_download(connection, filename, relative_directory=""):
             remaining -= len(chunk)
 
 
-# connect and handle client requests, new thread per client
-def handle_client(connection, address):
+def send_metrics_reports(connection):
+    try:
+        with metrics.metrics_lock:
+            metrics.save_report()
+    except OSError as error:
+        print(f"Could not save metrics reports: {error}")
+        send_response(connection, {"ok": False, "error": "Could not save metrics reports."})
+        return
+
+    report_paths = (
+        Path(metrics.JSON_REPORT_PATH),
+        Path(metrics.CSV_REPORT_PATH),
+    )
+    opened_reports = []
+    try:
+        reports = []
+        for path in report_paths:
+            report_file = path.open("rb")
+            opened_reports.append(report_file)
+            reports.append(
+                {
+                    "filename": path.name,
+                    "size": os.fstat(report_file.fileno()).st_size,
+                }
+            )
+    except OSError as error:
+        for report_file in opened_reports:
+            report_file.close()
+        print(f"Could not open metrics reports: {error}")
+        send_response(connection, {"ok": False, "error": "Metrics reports are unavailable."})
+        return
+
+    try:
+        send_response(connection, {"ok": True, "files": reports})
+        for report_file, report in zip(opened_reports, reports):
+            remaining = report["size"]
+            while remaining:
+                chunk = report_file.read(min(CHUNK_SIZE, remaining))
+                if not chunk:
+                    raise OSError(f"{report['filename']} changed while being sent.")
+                connection.sendall(chunk)
+                remaining -= len(chunk)
+    except OSError as error:
+        print(f"Sending metrics reports to the client failed: {error}")
+    finally:
+        for report_file in opened_reports:
+            report_file.close()
+
+
+def handle_command(connection, reader, request, address):
+    if not request.endswith(b"\n") or len(request) > 4096:
+        send_response(
+            connection,
+            {"ok": False, "error": "Request must be a command of at most 4095 bytes."},
+        )
+        return
+    if request.strip().upper() == b"DIR":
+        metrics.record_request_metadata((address[0], address[1]), "DIR")
+        list_directory(connection, {})
+        return
+
+    try:
+        command = json.loads(request.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        send_response(connection, {"ok": False, "error": "Invalid JSON request."})
+        return
+
+    if not isinstance(command, dict):
+        send_response(connection, {"ok": False, "error": "Invalid JSON request."})
+        return
+
+    metrics.record_request_metadata(
+        (address[0], address[1]),
+        command.get("command"),
+        command.get("filename") or command.get("path") or "",
+    )
+    if command.get("command") == "DIR":
+        list_directory(connection, command)
+    elif command.get("command") == "CD":
+        change_directory(connection, command)
+    elif command.get("command") == "UPLOAD":
+        receive_upload(connection, reader, command)
+    elif command.get("command") == "DOWNLOAD":
+        send_download(
+            connection,
+            command.get("filename"),
+            command.get("directory", ""),
+        )
+    elif command.get("command") == "DELETE":
+        delete_file(connection, command)
+    elif command.get("command") == "SUBFOLDER":
+        handle_subfolder(connection, command)
+    elif command.get("command") == "METRICS":
+        send_metrics_reports(connection)
+    else:
+        send_response(
+            connection,
+            {
+                "ok": False,
+                "error": "Unsupported command. Try DIR, CD, UPLOAD, DOWNLOAD, DELETE, SUBFOLDER, or METRICS.",
+            },
+        )
+
+
+# Wrap each connection in TLS and authenticate before dispatching a command.
+def handle_client(connection, address, tls_context, credentials):
     print(f"Connected by {address}")
-    with connection:
-        with connection.makefile("rb") as reader:
-            request = reader.readline(4097)
-            if not request.endswith(b"\n") or len(request) > 4096:
-                send_response(
-                    connection,
-                    {
-                        "ok": False,
-                        "error": "Request must be a command of at most 4095 bytes.",
-                    },
-                )
-            elif request.strip().upper() == b"DIR":
-                list_directory(connection, {})
-            elif request.startswith(b"{"):
-                try:
-                    upload_request = json.loads(request.decode("utf-8"))
-                except (UnicodeDecodeError, json.JSONDecodeError):
-                    send_response(connection, {"ok": False, "error": "Invalid JSON request."})
-                    return
-                if not isinstance(upload_request, dict):
-                    send_response(connection, {"ok": False, "error": "Invalid JSON request."})
-                elif upload_request.get("command") == "DIR":
-                    list_directory(connection, upload_request)
-                elif upload_request.get("command") == "CD":
-                    change_directory(connection, upload_request)
-                elif upload_request.get("command") == "UPLOAD":
-                    receive_upload(connection, reader, upload_request)
-                elif upload_request.get("command") == "DOWNLOAD":
-                    send_download(
-                        connection,
-                        upload_request.get("filename"),
-                        upload_request.get("directory", ""),
+    try:
+        with tls_context.wrap_socket(connection, server_side=True) as secure_connection:
+            with secure_connection.makefile("rb") as reader:
+                auth_line = reader.readline(4097)
+                if not auth_line.endswith(b"\n") or len(auth_line) > 4096:
+                    send_response(
+                        secure_connection,
+                        {"ok": False, "error": "Invalid authentication request."},
                     )
-                elif upload_request.get("command") == "DELETE":
-                    delete_file(connection, upload_request)
-                elif upload_request.get("command") == "SUBFOLDER":
-                    handle_subfolder(connection, upload_request)
-                else:
-                    send_response(connection, {"ok": False, "error": "Unsupported command."})
-            else:
+                    return
+                try:
+                    auth_request = json.loads(auth_line.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    send_response(
+                        secure_connection,
+                        {"ok": False, "error": "Invalid authentication request."},
+                    )
+                    return
+
+                if (
+                    not isinstance(auth_request, dict)
+                    or auth_request.get("command") != "AUTH"
+                    or not verify_credentials(
+                        auth_request.get("username"),
+                        auth_request.get("password"),
+                        credentials,
+                    )
+                ):
+                    send_response(
+                        secure_connection,
+                        {"ok": False, "error": "Authentication failed."},
+                    )
+                    return
+
                 send_response(
-                    connection,
-                    {
-                        "ok": False,
-                        "error": (
-                            "Unsupported command. Try DIR, CD, UPLOAD, DOWNLOAD, "
-                            "DELETE, or SUBFOLDER."
-                        ),
-                    },
+                    secure_connection,
+                    {"ok": True, "message": "Authenticated."},
                 )
+                request = reader.readline(4097)
+                if request:
+                    handle_command(secure_connection, reader, request, address)
+    except (ssl.SSLError, OSError) as error:
+        print(f"Secure connection from {address} failed: {error}")
 
 # driver code
 def main():
+    credentials = load_auth_credentials()
+    tls_context = create_tls_context()
     STORAGE_DIR.mkdir(parents=True, exist_ok=True)
     print(f"File storage: {STORAGE_DIR}")
+    print("TLS and password authentication enabled.")
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
         server.bind((HOST, PORT))
         server.listen()
@@ -498,11 +675,17 @@ def main():
             connection, address = server.accept()
             thread = threading.Thread(
                 target=handle_client,
-                args=(connection, address),
+                args=(connection, address, tls_context, credentials),
                 daemon=True,
             )
             thread.start()
 
 
 if __name__ == "__main__":
-    main()
+    if sys.argv[1:] == ["--create-password-hash"]:
+        try:
+            create_password_hash()
+        except ValueError as error:
+            raise SystemExit(str(error)) from error
+    else:
+        main()
